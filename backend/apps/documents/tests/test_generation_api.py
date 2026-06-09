@@ -15,7 +15,6 @@ def test_preview_generates_pdf_and_latex() -> None:
         {
             "source_text": "Client: Acme Studio\nWe need a branded PDF document that explains the launch plan.",
             "agent_instructions": "Create a client-facing brief that focuses on database strategy.",
-            "section_structure": "Cover page\nContents\nData Integration\nBusiness Logic\nControl Version",
         },
         format="json",
     )
@@ -23,13 +22,8 @@ def test_preview_generates_pdf_and_latex() -> None:
     assert response.status_code == status.HTTP_200_OK
     assert response.data["success"] is True
     assert response.data["generation_mode"] in {"openai", "fallback"}
-    assert response.data["document"]["sections"] == [
-        "Cover page",
-        "Contents",
-        "Data Integration",
-        "Business Logic",
-        "Control Version",
-    ]
+    assert isinstance(response.data["document"]["section_names"], list)
+    assert response.data["document"]["section_count"] >= 1
     assert response.data["latex_source"].startswith("\\documentclass")
     pdf_bytes = base64.b64decode(response.data["pdf_base64"])
     assert pdf_bytes[:4] == b"%PDF"

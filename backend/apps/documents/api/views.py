@@ -19,6 +19,7 @@ class DocumentPreviewView(APIView):
         serializer.is_valid(raise_exception=True)
 
         document = build_document_payload(serializer.validated_data)
+        section_names = [str(s.get("title", "")) for s in document.document_sections]
         return Response(
             {
                 "success": True,
@@ -26,12 +27,8 @@ class DocumentPreviewView(APIView):
                     "title": document.title,
                     "client_name": document.client_name,
                     "source_text": document.source_text,
-                    "sections": document.sections,
-                    "summary": document.summary,
-                    "scope": document.scope,
-                    "deliverables": document.deliverables,
-                    "timeline": document.timeline,
-                    "notes": document.notes,
+                    "section_names": section_names,
+                    "section_count": len(section_names),
                     "filename": document.filename,
                 },
                 "generation_mode": document.generation_mode,

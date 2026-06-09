@@ -197,9 +197,7 @@ export default function App() {
                   {isGenerating ? <LoaderCircle size={16} className="spin" /> : <ArrowDownToLine size={16} />}
                   {isGenerating ? 'Generating PDF...' : 'Generate preview'}
                 </button>
-                <span className="action-note">
-                  OpenAI generates the content and selects the most relevant sections automatically.
-                </span>
+
               </div>
             </form>
           </SectionCard>
@@ -237,24 +235,7 @@ export default function App() {
                   />
                 </div>
 
-                <div className="preview-grid">
-                  <article>
-                    <p className="preview-label">Generation mode</p>
-                    <strong>{preview.generation_mode || 'openai'}</strong>
-                  </article>
-                  <article>
-                    <p className="preview-label">Client</p>
-                    <strong>{preview.document.client_name || 'No client provided'}</strong>
-                  </article>
-                  <article>
-                    <p className="preview-label">Source length</p>
-                    <strong>{preview.document.source_text?.split(/\s+/).filter(Boolean).length || 0} words</strong>
-                  </article>
-                  <article>
-                    <p className="preview-label">Sections</p>
-                    <strong>{preview.document.sections?.length || 0}</strong>
-                  </article>
-                </div>
+                
 
                 <details className="latex-panel">
                   <summary>View generated LaTeX source</summary>
