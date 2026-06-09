@@ -1,39 +1,249 @@
-import '@ofi-summerai/markui/style.css'
+import { useEffect, useState } from 'react'
+import { motion } from 'framer-motion'
+import { ArrowDownToLine, FileText, Layers3, LoaderCircle, Sparkles, Upload, Wand2 } from 'lucide-react'
+import './App.css'
 
-import { Button } from '@ofi-summerai/markui/primitives'
-import { KPICard } from '@ofi-summerai/markui/components'
-import { TrendingUp } from 'lucide-react'
+const API_BASE_URL = (import.meta.env.VITE_API_URL || 'http://127.0.0.1:8000').replace(/\/$/, '')
 
-export default function Dashboard() {
+const DEFAULT_TRANSCRIPT = `Paste a meeting transcript, workshop notes, or raw requirements here.
+
+Example:
+Client: Northstar Studio
+Project: Launch documentation
+We discussed the product goals, timeline, approval process, and the need for a clean PDF the team can share with stakeholders.`
+
+function base64ToBlobUrl(base64Value) {
+  const binaryString = window.atob(base64Value)
+  const bytes = new Uint8Array(binaryString.length)
+
+  for (let index = 0; index < binaryString.length; index += 1) {
+    bytes[index] = binaryString.charCodeAt(index)
+  }
+
+  return URL.createObjectURL(new Blob([bytes], { type: 'application/pdf' }))
+}
+
+function textToBlobUrl(textValue) {
+  return URL.createObjectURL(new Blob([textValue], { type: 'text/x-tex;charset=utf-8' }))
+}
+
+function SectionCard({ title, icon, children }) {
   return (
-    <div className="p-6 space-y-4">
-      <div className="grid grid-cols-3 gap-4">
-        <KPICard
-          title="Total Reach"
-          value="124,500"
-          trend={12.4}
-          trendLabel="vs last month"
-          icon={<TrendingUp size={18} />}
-        />
-        <KPICard
-          title="Engagement Rate"
-          value="4.8%"
-          trend={-1.2}
-          trendLabel="vs last week"
-        />
-        <KPICard
-          title="Posts Published"
-          value={38}
-          trend={5.0}
-          trendLabel="this month"
-        />
+    <section className="panel-card">
+      <div className="panel-card__header">
+        <span className="panel-card__icon">{icon}</span>
+        <h2>{title}</h2>
       </div>
+      {children}
+    </section>
+  )
+}
 
-      <div className="flex gap-2">
-        <Button>Create Post</Button>
-        <Button variant="outline">View Analytics</Button>
-        <Button variant="ghost">Settings</Button>
-      </div>
+export default function App() {
+  const [sourceText, setSourceText] = useState(DEFAULT_TRANSCRIPT)
+  const [logoFile, setLogoFile] = useState(null)
+  const [preview, setPreview] = useState(null)
+  const [isGenerating, setIsGenerating] = useState(false)
+  const [error, setError] = useState('')
+
+  useEffect(() => {
+    return () => {
+      if (preview?.pdfUrl) {
+        URL.revokeObjectURL(preview.pdfUrl)
+      }
+      if (preview?.texUrl) {
+        URL.revokeObjectURL(preview.texUrl)
+      }
+    }
+  }, [preview?.pdfUrl, preview?.texUrl])
+
+  const handleLogoChange = (event) => {
+    const file = event.target.files?.[0] ?? null
+    setLogoFile(file)
+  }
+
+  const handleGenerate = async (event) => {
+    event.preventDefault()
+    setError('')
+    setIsGenerating(true)
+
+    try {
+      const payload = new FormData()
+      payload.append('source_text', sourceText)
+
+      if (logoFile) {
+        payload.append('logo', logoFile)
+      }
+
+      const response = await fetch(`${API_BASE_URL}/api/documents/preview/`, {
+        method: 'POST',
+        body: payload,
+      })
+
+      const responseData = await response.json().catch(() => null)
+
+      if (!response.ok) {
+        const message =
+          responseData?.errors
+            ? JSON.stringify(responseData.errors)
+            : 'Document generation failed.'
+        throw new Error(message)
+      }
+
+      const pdfUrl = base64ToBlobUrl(responseData.pdf_base64)
+      const texUrl = textToBlobUrl(responseData.latex_source || '')
+      const texFilename = (responseData.filename || 'document.pdf').replace(/\.pdf$/i, '.tex')
+
+      setPreview({
+        pdfUrl,
+        texUrl,
+        texFilename,
+        filename: responseData.filename,
+        document: responseData.document,
+        latexSource: responseData.latex_source || '',
+        generation_mode: responseData.generation_mode || 'openai',
+      })
+    } catch (generationError) {
+      setError(generationError.message)
+    } finally {
+      setIsGenerating(false)
+    }
+  }
+
+  return (
+    <div className="app-shell">
+      <div className="app-backdrop app-backdrop--one" />
+      <div className="app-backdrop app-backdrop--two" />
+
+      <header className="hero">
+        <div className="hero__copy">
+          <p className="eyebrow">
+            <Sparkles size={14} /> Automatic documentation creator
+          </p>
+          <h1>Turn a transcript into a polished client PDF.</h1>
+          <p className="hero__description">
+            Paste the full transcript or notes dump once, optionally attach a logo, and let OpenAI draft the LaTeX
+            source and documentation text for the PDF preview.
+          </p>
+        </div>
+
+        <div className="hero__summary">
+          <div className="hero__summary-badge">
+            <Wand2 size={16} /> LLM-driven flow
+          </div>
+          <ul>
+            <li>One big text field</li>
+            <li>OpenAI-generated structure</li>
+            <li>PDF preview and download</li>
+          </ul>
+        </div>
+      </header>
+
+      <main className="workspace-grid">
+        <section className="editor-column">
+          <SectionCard title="Transcript input" icon={<FileText size={18} />}>
+            <form className="creator-form" onSubmit={handleGenerate}>
+              <label className="field-group">
+                <span className="field-label">Raw transcript or notes</span>
+                <textarea
+                  className="creator-field creator-textarea"
+                  value={sourceText}
+                  placeholder="Paste your transcript here"
+                  onChange={(event) => setSourceText(event.target.value)}
+                  rows={18}
+                />
+                <span className="field-note">
+                  This is the only required input. The backend uses it to generate the title, sections, LaTeX, and
+                  PDF.
+                </span>
+              </label>
+
+              <label className="field-group field-group--file">
+                <span className="field-label">
+                  <Upload size={14} /> Client logo, optional
+                </span>
+                <input className="creator-file" type="file" accept="image/png,image/jpeg,image/webp" onChange={handleLogoChange} />
+                <span className="field-note">Attach a logo if the output needs branding.</span>
+                {logoFile ? <span className="file-pill">{logoFile.name}</span> : null}
+              </label>
+
+              <div className="action-row">
+                <button className="primary-button" type="submit" disabled={isGenerating}>
+                  {isGenerating ? <LoaderCircle size={16} className="spin" /> : <ArrowDownToLine size={16} />}
+                  {isGenerating ? 'Generating PDF...' : 'Generate preview'}
+                </button>
+                <span className="action-note">
+                  OpenAI generates the document structure and LaTeX source on the backend.
+                </span>
+              </div>
+            </form>
+          </SectionCard>
+        </section>
+
+        <section className="preview-column">
+          <SectionCard title="PDF preview" icon={<Layers3 size={18} />}>
+            {error ? <div className="alert alert--error">{error}</div> : null}
+
+            {preview ? (
+              <>
+                <div className="preview-toolbar">
+                  <div>
+                    <p className="preview-label">Ready to download</p>
+                    <h3>{preview.document.title}</h3>
+                  </div>
+                  <div className="download-actions">
+                    <a className="secondary-button" href={preview.pdfUrl} download={preview.filename}>
+                      <ArrowDownToLine size={16} /> Download PDF
+                    </a>
+                    <a className="secondary-button" href={preview.texUrl} download={preview.texFilename}>
+                      <ArrowDownToLine size={16} /> Download TEX
+                    </a>
+                  </div>
+                </div>
+
+                <div className="pdf-frame-wrap">
+                  <iframe
+                    className="pdf-frame"
+                    src={preview.pdfUrl}
+                    title="Generated document preview"
+                  />
+                </div>
+
+                <div className="preview-grid">
+                  <article>
+                    <p className="preview-label">Generation mode</p>
+                    <strong>{preview.generation_mode || 'openai'}</strong>
+                  </article>
+                  <article>
+                    <p className="preview-label">Client</p>
+                    <strong>{preview.document.client_name || 'No client provided'}</strong>
+                  </article>
+                  <article>
+                    <p className="preview-label">Source length</p>
+                    <strong>{preview.document.source_text?.split(/\s+/).filter(Boolean).length || 0} words</strong>
+                  </article>
+                </div>
+
+                <details className="latex-panel">
+                  <summary>View generated LaTeX source</summary>
+                  <pre>{preview.latexSource}</pre>
+                </details>
+              </>
+            ) : (
+              <div className="empty-state">
+                <div className="empty-state__icon">
+                  <FileText size={24} />
+                </div>
+                <h3>No PDF generated yet</h3>
+                <p>
+                  Paste the transcript, optionally attach a logo, and generate the first preview to see the rendered
+                  document here.
+                </p>
+              </div>
+            )}
+          </SectionCard>
+        </section>
+      </main>
     </div>
   )
 }

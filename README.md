@@ -1,6 +1,8 @@
-# Django + React Monorepo
+# Automatic Documentation Creator
 
 Full-stack monorepo: React (Vite) frontend → **Vercel** · Django API backend → **Railway**.
+
+The app turns a pasted transcript or notes dump into a client-ready document, renders it as a PDF, and keeps the template editable in the frontend.
 
 ## Structure
 
@@ -58,6 +60,8 @@ DJANGO_SETTINGS_MODULE=config.settings.development
 SECRET_KEY=change-me
 DATABASE_URL=postgres://postgres:postgres@localhost:5432/backend_template
 CORS_ALLOWED_ORIGINS=http://localhost:5173
+OPENAI_API_KEY=your-key-here
+OPENAI_MODEL=gpt-4.1-mini
 ```
 
 ---
@@ -147,3 +151,13 @@ railway run <cmd>     # run a command inside the Railway environment
 | Django Admin | http://127.0.0.1:8000/admin/ | `https://your-app.up.railway.app/admin/` |
 | API Docs | http://127.0.0.1:8000/api/schema/swagger-ui/ | `https://your-app.up.railway.app/api/schema/swagger-ui/` |
 | Health check | http://127.0.0.1:8000/health/ | `https://your-app.up.railway.app/health/` |
+
+---
+
+## Document generation flow
+
+1. Paste a meeting transcript or other raw notes into the frontend editor.
+2. Optionally add a client name and logo.
+3. Click **Generate preview** to send the transcript to `POST /api/documents/preview/`.
+4. The backend uses OpenAI to generate the document text and LaTeX source, then returns a rendered PDF.
+5. Preview the PDF in the app and download the final file.

@@ -8,4 +8,7 @@ gunicorn==23.0.0
 psycopg[binary]==3.2.10
 pytest==8.4.2
 pytest-django==4.11.1
+pillow==11.1.0
+reportlab==4.2.5
+openai==1.66.3
 whitenoise==6.10.0
