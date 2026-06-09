@@ -30,7 +30,7 @@ from reportlab.platypus import (
 # Constants
 # ---------------------------------------------------------------------------
 
-OFI_LOGO_PATH = Path(__file__).resolve().parents[2] / "assets" / "ofi-logo.png"
+ASSETS_DIR = Path(__file__).resolve().parents[2] / "assets"
 
 DocSection = dict[str, Any]
 
@@ -59,13 +59,14 @@ class RenderedDocument:
 def build_document_payload(validated_data: dict[str, Any]) -> RenderedDocument:
     source_text = validated_data["source_text"].strip()
     agent_instructions = validated_data.get("agent_instructions", "").strip()
+    document_language = detect_document_language(source_text, agent_instructions)
 
     pdf_texts = extract_pdf_texts(validated_data.get("source_pdfs") or [])
     if pdf_texts:
         joined = "\n\n---\n\n".join(pdf_texts)
         source_text = f"{source_text}\n\n--- Extracted from uploaded PDFs ---\n\n{joined}".strip()
 
-    doc_data = generate_document_data(source_text, agent_instructions)
+    doc_data = generate_document_data(source_text, agent_instructions, document_language)
     generation_mode = str(doc_data.get("generation_mode", "fallback"))
     title = str(doc_data.get("title", "")).strip() or _fallback_title(source_text)
     client_name = str(doc_data.get("client_name", "")).strip()
@@ -73,10 +74,10 @@ def build_document_payload(validated_data: dict[str, Any]) -> RenderedDocument:
     latex_source = str(doc_data.get("latex_source", "")).strip()
 
     if not document_sections:
-        document_sections = _fallback_sections(source_text)
+        document_sections = _fallback_sections(source_text, document_language)
 
     if not latex_source:
-        latex_source = _build_latex(title, client_name, document_sections)
+        latex_source = _build_latex(title, client_name, document_sections, document_language)
 
     filename = slugify(title) or "documentation"
     timestamp = datetime.now(timezone.utc).strftime("%Y-%m-%d %H:%M UTC")
@@ -86,6 +87,7 @@ def build_document_payload(validated_data: dict[str, Any]) -> RenderedDocument:
         client_name=client_name,
         source_text=source_text,
         document_sections=document_sections,
+        document_language=document_language,
         logo=validated_data.get("logo"),
         timestamp=timestamp,
     )
@@ -93,6 +95,7 @@ def build_document_payload(validated_data: dict[str, Any]) -> RenderedDocument:
         title=title,
         client_name=client_name,
         document_sections=document_sections,
+        document_language=document_language,
         timestamp=timestamp,
     )
 
@@ -141,16 +144,24 @@ _SYSTEM_PROMPT = (
 )
 
 
-def generate_document_data(source_text: str, agent_instructions: str = "") -> dict[str, Any]:
+def generate_document_data(source_text: str, agent_instructions: str = "", document_language: str = "en") -> dict[str, Any]:
     api_key = _env_value("OPENAI_API_KEY")
     model = _env_value("OPENAI_MODEL", default="gpt-4.1-mini")
 
     if not api_key:
-        return _fallback_document_data(source_text)
+        return _fallback_document_data(source_text, document_language)
 
     try:
         client = OpenAI(api_key=api_key)
         messages: list[dict[str, str]] = [{"role": "system", "content": _SYSTEM_PROMPT}]
+        messages.append({
+            "role": "system",
+            "content": (
+                "Write the section titles and content in Spanish if the transcript/instructions are mainly Spanish. "
+                "Write them in English if the transcript/instructions are mainly English. "
+                f"Detected language preference: {document_language}."
+            ),
+        })
         if agent_instructions:
             messages.append({"role": "system", "content": f"Additional author instructions: {agent_instructions}"})
         messages.append({"role": "user", "content": source_text})
@@ -164,19 +175,19 @@ def generate_document_data(source_text: str, agent_instructions: str = "") -> di
         raw = response.choices[0].message.content or "{}"
         parsed = json.loads(raw)
         parsed["generation_mode"] = "openai"
-        parsed["document_sections"] = _normalise_sections(parsed.get("document_sections", []), source_text)
+        parsed["document_sections"] = _normalise_sections(parsed.get("document_sections", []), source_text, document_language)
         return parsed
     except Exception:
-        return _fallback_document_data(source_text)
+        return _fallback_document_data(source_text, document_language)
 
 
 # ---------------------------------------------------------------------------
 # Section normalisation & fallback
 # ---------------------------------------------------------------------------
 
-def _normalise_sections(raw: Any, source_text: str) -> list[DocSection]:
+def _normalise_sections(raw: Any, source_text: str, document_language: str) -> list[DocSection]:
     if not isinstance(raw, list):
-        return _fallback_sections(source_text)
+        return _fallback_sections(source_text, document_language)
 
     sections: list[DocSection] = []
     for item in raw:
@@ -206,31 +217,32 @@ def _normalise_sections(raw: Any, source_text: str) -> list[DocSection]:
 
         sections.append({"title": title, "type": sec_type, "content": content})
 
-    return sections if sections else _fallback_sections(source_text)
+    return sections if sections else _fallback_sections(source_text, document_language)
 
 
-def _fallback_sections(source_text: str) -> list[DocSection]:
+def _fallback_sections(source_text: str, document_language: str) -> list[DocSection]:
     summary = _fallback_summary(source_text)
     lines = _extract_lines(source_text)[:6] or ["See source context for details."]
+    labels = localized_labels(document_language)
     return [
-        {"title": "Executive Summary", "type": "paragraph", "content": summary},
-        {"title": "Key Points", "type": "bullets", "content": lines},
+        {"title": labels["executive_summary"], "type": "paragraph", "content": summary},
+        {"title": labels["key_points"], "type": "bullets", "content": lines},
         {
-            "title": "Version Control",
+            "title": labels["version_control"],
             "type": "table",
             "content": {
-                "headers": ["Version", "Date", "Author", "Notes"],
-                "rows": [["1.0", datetime.now(timezone.utc).strftime("%Y-%m-%d"), "", "Initial draft"]],
+                "headers": labels["version_headers"],
+                "rows": [["1.0", datetime.now(timezone.utc).strftime("%Y-%m-%d"), "", labels["initial_draft"]]],
             },
         },
     ]
 
 
-def _fallback_document_data(source_text: str) -> dict[str, Any]:
+def _fallback_document_data(source_text: str, document_language: str) -> dict[str, Any]:
     title = _fallback_title(source_text)
     client_name = _fallback_client_name(source_text)
-    document_sections = _fallback_sections(source_text)
-    latex_source = _build_latex(title, client_name, document_sections)
+    document_sections = _fallback_sections(source_text, document_language)
+    latex_source = _build_latex(title, client_name, document_sections, document_language)
     return {
         "title": title,
         "client_name": client_name,
@@ -244,9 +256,11 @@ def _fallback_document_data(source_text: str) -> dict[str, Any]:
 # LaTeX generation
 # ---------------------------------------------------------------------------
 
-def _build_latex(title: str, client_name: str, document_sections: list[DocSection]) -> str:
-    ofi_logo_block = "\\includegraphics[width=1.8cm]{ofi-logo}" if OFI_LOGO_PATH.exists() else "\\fbox{\\textbf{OFI}}"
-    client_line = f"\\textbf{{Client}}: {_le(client_name)}\\\\" if client_name else ""
+def _build_latex(title: str, client_name: str, document_sections: list[DocSection], document_language: str) -> str:
+    logo_path = resolve_ofi_logo_path()
+    labels = localized_labels(document_language)
+    ofi_logo_block = "\\includegraphics[width=1.8cm]{ofi-logo}" if logo_path else "\\fbox{\\textbf{OFI}}"
+    client_line = f"\\textbf{{{_le(labels['client'])}}}: {_le(client_name)}\\\\" if client_name else ""
 
     toc_items = "\n".join(f"\\item {_le(str(sec.get('title', '')))}" for sec in document_sections)
     body_blocks: list[str] = []
@@ -298,11 +312,11 @@ def _build_latex(title: str, client_name: str, document_sections: list[DocSectio
         "\\begin{center}\n"
         f"{{\\LARGE\\bfseries {_le(title)}}}\\\\[0.45cm]\n"
         f"{client_line}\n"
-        "\\textbf{Version}: 1.0\n"
+        f"\\textbf{{{_le(labels['version'])}}}: 1.0\n"
         "\\end{center}\n"
         "\\newpage\n"
         f"\\noindent\\hfill{ofi_logo_block}\\par\n"
-        "\\section*{Contents}\n"
+        f"\\section*{{{_le(labels['contents'])}}}\n"
         "\\begin{itemize}[leftmargin=1.2em]\n"
         f"{toc_items}\n"
         "\\end{itemize}\n\n"
@@ -335,6 +349,7 @@ def render_pdf(
     client_name: str,
     source_text: str,
     document_sections: list[DocSection],
+    document_language: str,
     logo: Any,
     timestamp: str,
 ) -> bytes:
@@ -377,8 +392,10 @@ def render_pdf(
         client_logo_bytes = io.BytesIO(logo.read())
         logo_reader = ImageReader(client_logo_bytes)
 
-    if OFI_LOGO_PATH.exists():
-        ofi_logo_reader = ImageReader(str(OFI_LOGO_PATH))
+    logo_path = resolve_ofi_logo_path()
+    labels = localized_labels(document_language)
+    if logo_path:
+        ofi_logo_reader = ImageReader(str(logo_path))
 
     # Cover page
     if client_logo_bytes:
@@ -389,11 +406,11 @@ def render_pdf(
     story.append(Paragraph(_p(title or "Document"), S["title"]))
     if client_name:
         story.append(Paragraph(_p(client_name), S["subtitle"]))
-    story.append(Paragraph(_p(f"Version 1.0  |  {timestamp}"), S["subtitle"]))
+    story.append(Paragraph(_p(f"{labels['version']} 1.0  |  {timestamp}"), S["subtitle"]))
     story.append(PageBreak())
 
     # Table of contents
-    story.append(Paragraph("Contents", S["h1"]))
+    story.append(Paragraph(labels["contents"], S["h1"]))
     for sec in document_sections:
         story.append(Paragraph(_p(str(sec.get("title", ""))), S["toc"], bulletText="-"))
     story.append(Spacer(1, 0.5 * cm))
@@ -480,27 +497,30 @@ def render_docx(
     title: str,
     client_name: str,
     document_sections: list[DocSection],
+    document_language: str,
     timestamp: str,
 ) -> bytes:
     document = Document()
+    labels = localized_labels(document_language)
 
     header = document.sections[0].header
     hp = header.paragraphs[0] if header.paragraphs else header.add_paragraph()
     hp.alignment = 2
-    if OFI_LOGO_PATH.exists():
-        hp.add_run().add_picture(str(OFI_LOGO_PATH), width=Cm(1.4))
+    logo_path = resolve_ofi_logo_path()
+    if logo_path:
+        hp.add_run().add_picture(str(logo_path), width=Cm(1.4))
     else:
         run = hp.add_run("OFI")
         run.bold = True
 
     document.add_heading(title or "Document", level=1)
     if client_name:
-        document.add_paragraph(f"Client: {client_name}")
-    document.add_paragraph("Version: 1.0")
+        document.add_paragraph(f"{labels['client']}: {client_name}")
+    document.add_paragraph(f"{labels['version']}: 1.0")
     document.add_paragraph(f"Generated: {timestamp}")
     document.add_page_break()
 
-    document.add_heading("Contents", level=1)
+    document.add_heading(labels["contents"], level=1)
     for sec in document_sections:
         document.add_paragraph(str(sec.get("title", "")), style="List Bullet")
 
@@ -574,6 +594,59 @@ def pdf_base64(pdf_bytes: bytes) -> str:
 
 def docx_base64(docx_bytes: bytes) -> str:
     return base64.b64encode(docx_bytes).decode("ascii")
+
+
+def detect_document_language(source_text: str, agent_instructions: str = "") -> str:
+    combined = f"{source_text}\n{agent_instructions}".lower()
+    spanish_hits = sum(
+        word in combined
+        for word in [" el ", " la ", " los ", " las ", " para ", " documento ", " cliente ", " seccion ", " secciones ", " que ", " con "]
+    )
+    english_hits = sum(
+        word in combined
+        for word in [" the ", " document ", " client ", " section ", " sections ", " with ", " for ", " and ", " requirements "]
+    )
+    return "es" if spanish_hits >= english_hits else "en"
+
+
+def localized_labels(language: str) -> dict[str, Any]:
+    if language == "es":
+        return {
+            "contents": "Contenido",
+            "client": "Cliente",
+            "version": "Versión",
+            "executive_summary": "Resumen Ejecutivo",
+            "key_points": "Puntos Clave",
+            "version_control": "Control de Versiones",
+            "version_headers": ["Versión", "Fecha", "Autor", "Notas"],
+            "initial_draft": "Borrador inicial",
+        }
+    return {
+        "contents": "Contents",
+        "client": "Client",
+        "version": "Version",
+        "executive_summary": "Executive Summary",
+        "key_points": "Key Points",
+        "version_control": "Version Control",
+        "version_headers": ["Version", "Date", "Author", "Notes"],
+        "initial_draft": "Initial draft",
+    }
+
+
+def resolve_ofi_logo_path() -> Path | None:
+    candidates = [
+        ASSETS_DIR / "ofi-logo.png",
+        ASSETS_DIR / "ofi-logo.png.png",
+        ASSETS_DIR / "ofi-logo.jpg",
+        ASSETS_DIR / "ofi-logo.jpeg",
+        ASSETS_DIR / "ofi-logo.webp",
+    ]
+    for candidate in candidates:
+        if candidate.exists():
+            return candidate
+
+    prefix_matches = sorted(ASSETS_DIR.glob("ofi-logo*")) if ASSETS_DIR.exists() else []
+    return prefix_matches[0] if prefix_matches else None
 
 
 def extract_pdf_texts(pdf_files: list[Any]) -> list[str]:
