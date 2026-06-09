@@ -167,7 +167,7 @@ export default function App() {
                 <input
                   className="creator-field"
                   value={agentInstructions}
-                  placeholder='Example: "I want a document that explains the use of Neo4j for a client."'
+                  placeholder='Example: "I want a document that explains the use of Celonis to a client."'
                   onChange={(event) => setAgentInstructions(event.target.value)}
                 />
               </label>
