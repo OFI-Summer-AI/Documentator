@@ -1,5 +1,4 @@
 import { useEffect, useState } from 'react'
-import { motion } from 'framer-motion'
 import { ArrowDownToLine, FileText, Layers3, LoaderCircle, Sparkles, Upload, Wand2 } from 'lucide-react'
 import './App.css'
 
@@ -27,6 +26,21 @@ function textToBlobUrl(textValue) {
   return URL.createObjectURL(new Blob([textValue], { type: 'text/x-tex;charset=utf-8' }))
 }
 
+function base64ToDocxBlobUrl(base64Value) {
+  const binaryString = window.atob(base64Value)
+  const bytes = new Uint8Array(binaryString.length)
+
+  for (let index = 0; index < binaryString.length; index += 1) {
+    bytes[index] = binaryString.charCodeAt(index)
+  }
+
+  return URL.createObjectURL(
+    new Blob([bytes], {
+      type: 'application/vnd.openxmlformats-officedocument.wordprocessingml.document',
+    }),
+  )
+}
+
 function SectionCard({ title, icon, children }) {
   return (
     <section className="panel-card">
@@ -41,6 +55,7 @@ function SectionCard({ title, icon, children }) {
 
 export default function App() {
   const [sourceText, setSourceText] = useState(DEFAULT_TRANSCRIPT)
+  const [agentInstructions, setAgentInstructions] = useState('')
   const [logoFile, setLogoFile] = useState(null)
   const [preview, setPreview] = useState(null)
   const [isGenerating, setIsGenerating] = useState(false)
@@ -54,8 +69,11 @@ export default function App() {
       if (preview?.texUrl) {
         URL.revokeObjectURL(preview.texUrl)
       }
+      if (preview?.docxUrl) {
+        URL.revokeObjectURL(preview.docxUrl)
+      }
     }
-  }, [preview?.pdfUrl, preview?.texUrl])
+  }, [preview?.pdfUrl, preview?.texUrl, preview?.docxUrl])
 
   const handleLogoChange = (event) => {
     const file = event.target.files?.[0] ?? null
@@ -70,6 +88,7 @@ export default function App() {
     try {
       const payload = new FormData()
       payload.append('source_text', sourceText)
+      payload.append('agent_instructions', agentInstructions)
 
       if (logoFile) {
         payload.append('logo', logoFile)
@@ -92,12 +111,16 @@ export default function App() {
 
       const pdfUrl = base64ToBlobUrl(responseData.pdf_base64)
       const texUrl = textToBlobUrl(responseData.latex_source || '')
+      const docxUrl = base64ToDocxBlobUrl(responseData.docx_base64 || '')
       const texFilename = (responseData.filename || 'document.pdf').replace(/\.pdf$/i, '.tex')
+      const docxFilename = responseData.docx_filename || (responseData.filename || 'document.pdf').replace(/\.pdf$/i, '.docx')
 
       setPreview({
         pdfUrl,
         texUrl,
+        docxUrl,
         texFilename,
+        docxFilename,
         filename: responseData.filename,
         document: responseData.document,
         latexSource: responseData.latex_source || '',
@@ -141,10 +164,20 @@ export default function App() {
 
       <main className="workspace-grid">
         <section className="editor-column">
-          <SectionCard title="Transcript input" icon={<FileText size={18} />}>
+          <SectionCard title="Text Input" icon={<FileText size={18} />}>
             <form className="creator-form" onSubmit={handleGenerate}>
               <label className="field-group">
-                <span className="field-label">Raw transcript or notes</span>
+                <span className="field-label">Instruction for the agent (optional)</span>
+                <input
+                  className="creator-field"
+                  value={agentInstructions}
+                  placeholder='Example: "I want a document that explains the use of Neo4j for a client."'
+                  onChange={(event) => setAgentInstructions(event.target.value)}
+                />
+              </label>
+
+              <label className="field-group">
+                <span className="field-label">Add text or notes</span>
                 <textarea
                   className="creator-field creator-textarea"
                   value={sourceText}
@@ -194,6 +227,9 @@ export default function App() {
                   <div className="download-actions">
                     <a className="secondary-button" href={preview.pdfUrl} download={preview.filename}>
                       <ArrowDownToLine size={16} /> Download PDF
+                    </a>
+                    <a className="secondary-button" href={preview.docxUrl} download={preview.docxFilename}>
+                      <ArrowDownToLine size={16} /> Download Word
                     </a>
                     <a className="secondary-button" href={preview.texUrl} download={preview.texFilename}>
                       <ArrowDownToLine size={16} /> Download TEX

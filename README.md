@@ -159,5 +159,6 @@ railway run <cmd>     # run a command inside the Railway environment
 1. Paste a meeting transcript or other raw notes into the frontend editor.
 2. Optionally add a client name and logo.
 3. Click **Generate preview** to send the transcript to `POST /api/documents/preview/`.
-4. The backend uses OpenAI to generate the document text and LaTeX source, then returns a rendered PDF.
-5. Preview the PDF in the app and download the final file.
+4. Optionally add a short instruction prompt (for example: a Neo4j-focused client brief).
+5. The backend uses OpenAI to generate the document text and LaTeX source, then returns rendered PDF and Word outputs.
+6. Preview the PDF in the app and download PDF, Word, or `.tex` files.

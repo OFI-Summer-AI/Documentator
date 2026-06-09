@@ -11,4 +11,5 @@ pytest-django==4.11.1
 pillow==11.1.0
 reportlab==4.2.5
 openai==1.66.3
+python-docx==1.1.2
 whitenoise==6.10.0

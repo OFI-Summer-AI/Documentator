@@ -14,6 +14,7 @@ def test_preview_generates_pdf_and_latex() -> None:
         "/api/documents/preview/",
         {
             "source_text": "Client: Acme Studio\nWe need a branded PDF document that explains the launch plan.",
+            "agent_instructions": "Create a client-facing brief that focuses on database strategy.",
         },
         format="json",
     )
@@ -24,4 +25,7 @@ def test_preview_generates_pdf_and_latex() -> None:
     assert response.data["latex_source"].startswith("\\documentclass")
     pdf_bytes = base64.b64decode(response.data["pdf_base64"])
     assert pdf_bytes[:4] == b"%PDF"
+    docx_bytes = base64.b64decode(response.data["docx_base64"])
+    assert docx_bytes[:2] == b"PK"
     assert response.data["filename"].endswith(".pdf")
+    assert response.data["docx_filename"].endswith(".docx")

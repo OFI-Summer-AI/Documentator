@@ -9,6 +9,7 @@ from dataclasses import dataclass
 from datetime import datetime, timezone
 from typing import Any
 
+from docx import Document
 from django.utils.text import slugify
 from openai import OpenAI
 from reportlab.lib import colors
@@ -17,7 +18,7 @@ from reportlab.lib.pagesizes import A4
 from reportlab.lib.styles import ParagraphStyle, getSampleStyleSheet
 from reportlab.lib.units import cm
 from reportlab.lib.utils import ImageReader
-from reportlab.platypus import Image, Paragraph, SimpleDocTemplate, Spacer, Table, TableStyle
+from reportlab.platypus import Image, PageBreak, Paragraph, SimpleDocTemplate, Spacer, Table, TableStyle
 
 
 @dataclass(slots=True)
@@ -32,6 +33,7 @@ class RenderedDocument:
     notes: list[str]
     filename: str
     pdf_bytes: bytes
+    docx_bytes: bytes
     latex_source: str
     generation_mode: str
 
@@ -70,9 +72,10 @@ def derive_section(lines: list[str], context: str, fallback: list[str]) -> list[
 
 def build_document_payload(validated_data: dict[str, Any]) -> RenderedDocument:
     source_text = validated_data["source_text"].strip()
+    agent_instructions = validated_data.get("agent_instructions", "").strip()
     generation_mode = "fallback"
 
-    document_data = generate_document_data(source_text)
+    document_data = generate_document_data(source_text, agent_instructions)
     if document_data.get("generation_mode"):
         generation_mode = str(document_data["generation_mode"])
 
@@ -99,6 +102,17 @@ def build_document_payload(validated_data: dict[str, Any]) -> RenderedDocument:
         logo=validated_data.get("logo"),
         timestamp=timestamp,
     )
+    docx_bytes = render_docx(
+        title=title,
+        client_name=client_name,
+        source_text=source_text,
+        summary=summary,
+        scope=scope,
+        deliverables=deliverables,
+        timeline=timeline,
+        notes=notes,
+        timestamp=timestamp,
+    )
 
     return RenderedDocument(
         title=title,
@@ -111,12 +125,13 @@ def build_document_payload(validated_data: dict[str, Any]) -> RenderedDocument:
         notes=notes,
         filename=filename,
         pdf_bytes=pdf_bytes,
+        docx_bytes=docx_bytes,
         latex_source=latex_source,
         generation_mode=generation_mode,
     )
 
 
-def generate_document_data(source_text: str) -> dict[str, Any]:
+def generate_document_data(source_text: str, agent_instructions: str = "") -> dict[str, Any]:
     api_key = _env_value("OPENAI_API_KEY")
     model = _env_value("OPENAI_MODEL", default="gpt-4.1-mini")
 
@@ -137,7 +152,17 @@ def generate_document_data(source_text: str) -> dict[str, Any]:
                         "Return only valid JSON with these keys: title, client_name, summary, scope, deliverables, timeline, notes, latex_source. "
                         "Title must be concise. client_name may be empty. summary must be 2-3 sentences. "
                         "scope, deliverables, timeline, and notes must each be arrays of short bullets. "
-                        "latex_source must be a complete LaTeX document that includes the same content and is ready to compile."
+                        "The resulting document should follow this order: Cover page, Contents, Data Integration, Studio, Business Logic, Main KPIs, Filter dimensions, Business dimensions, Control Version. "
+                        "Never include the raw transcript as-is in any section. Extract and synthesize the information instead. "
+                        "latex_source must be a complete LaTeX document that includes only synthesized documentation content and is ready to compile."
+                    ),
+                },
+                {
+                    "role": "system",
+                    "content": (
+                        f"Additional author instructions: {agent_instructions}"
+                        if agent_instructions
+                        else "Additional author instructions: None provided."
                     ),
                 },
                 {"role": "user", "content": source_text},
@@ -269,6 +294,7 @@ def _fallback_latex(
         return "\n".join(f"\\item {latex_escape(item)}" for item in items)
 
     client_line = f"\\textbf{{Client}}: {latex_escape(client_name)}\\\\" if client_name else ""
+    studio_text = _fallback_studio_text(summary, scope, deliverables)
 
     return f"""\\documentclass[11pt,a4paper]{{article}}
 \\usepackage[margin=1in]{{geometry}}
@@ -280,31 +306,47 @@ def _fallback_latex(
 \\usepackage{{hyperref}}
 \\hypersetup{{colorlinks=true, linkcolor=teal!60!black, urlcolor=teal!60!black}}
 \\begin{{document}}
+\\noindent\\hfill\\fbox{{\\textbf{{OFI}}}}\\par
+\\vspace{{1.2cm}}
 \\begin{{center}}
-{{\\LARGE\\bfseries {latex_escape(title)}}}\\\\[0.25cm]
+{{\\LARGE\\bfseries {latex_escape(title)}}}\\\\[0.45cm]
 {client_line}
+\\textbf{{Version}}: 1.0
 \\end{{center}}
-\\vspace{{0.5cm}}
-\\section*{{Executive Summary}}
+\\newpage
+\\noindent\\hfill\\fbox{{\\textbf{{OFI}}}}\\par
+\\section*{{Contents}}
+\\begin{{itemize}}[leftmargin=1.2em]
+\\item Data Integration
+\\item Studio
+\\item Business Logic
+\\item Main KPIs
+\\item Filter dimensions
+\\item Business dimensions
+\\item Control Version
+\\end{{itemize}}
+\\section*{{Data Integration}}
 {latex_escape(summary)}
-\\section*{{Source Transcript}}
-{latex_escape(source_text)}
-\\section*{{Scope}}
+\\section*{{Studio}}
+{latex_escape(studio_text)}
+\\section*{{Business Logic}}
 \\begin{{itemize}}[leftmargin=1.2em]
 {bullet_block(scope)}
 \\end{{itemize}}
-\\section*{{Deliverables}}
+\\section*{{Main KPIs}}
 \\begin{{itemize}}[leftmargin=1.2em]
 {bullet_block(deliverables)}
 \\end{{itemize}}
-\\section*{{Timeline}}
+\\section*{{Filter dimensions}}
 \\begin{{itemize}}[leftmargin=1.2em]
 {bullet_block(timeline)}
 \\end{{itemize}}
-\\section*{{Notes}}
+\\section*{{Business dimensions}}
 \\begin{{itemize}}[leftmargin=1.2em]
 {bullet_block(notes)}
 \\end{{itemize}}
+\\section*{{Control Version}}
+Version 1.0
 \\end{{document}}
 """
 
@@ -471,9 +513,25 @@ def render_pdf(
         story.append(Image(logo_bytes, width=3.2 * cm, height=3.2 * cm, kind="proportional"))
         story.append(Spacer(1, 0.35 * cm))
 
-    story.append(Paragraph(_escape_paragraph(title), title_style))
+    # Cover page
+    story.append(Spacer(1, 5.0 * cm))
+    story.append(Paragraph(_escape_paragraph(title or "[Use Case/App Name]"), title_style))
     story.append(Paragraph(_escape_paragraph(client_name or "Client-ready documentation"), subtitle_style))
-    story.append(Paragraph(_escape_paragraph(f"Generated {timestamp}"), subtitle_style))
+    story.append(Paragraph(_escape_paragraph(f"Version 1.0 - {timestamp}"), subtitle_style))
+    story.append(PageBreak())
+
+    # Contents page
+    story.append(Paragraph("Contents", heading_style))
+    for item in [
+        "Data Integration",
+        "Studio",
+        "Business Logic",
+        "Main KPIs",
+        "Filter dimensions",
+        "Business dimensions",
+        "Control Version",
+    ]:
+        story.append(Paragraph(_escape_paragraph(item), bullet_style, bulletText="•"))
     story.append(Spacer(1, 0.4 * cm))
 
     metadata_rows = [
@@ -500,17 +558,18 @@ def render_pdf(
     story.append(Spacer(1, 0.5 * cm))
 
     sections = [
-        ("Executive Summary", [summary]),
-        ("Source Transcript", [source_text]),
-        ("Scope", scope),
-        ("Deliverables", deliverables),
-        ("Timeline", timeline),
-        ("Notes", notes),
+        ("Data Integration", [summary]),
+        ("Studio", [_fallback_studio_text(summary, scope, deliverables)]),
+        ("Business Logic", scope),
+        ("Main KPIs", deliverables),
+        ("Filter dimensions", timeline),
+        ("Business dimensions", notes),
+        ("Control Version", ["1.0"]),
     ]
 
     for section_title, items in sections:
         story.append(Paragraph(_escape_paragraph(section_title), heading_style))
-        if len(items) == 1 and section_title in {"Executive Summary", "Source Context"}:
+        if len(items) == 1 and section_title in {"Data Integration", "Studio", "Control Version"}:
             story.append(Paragraph(_escape_paragraph(items[0]), body_style))
         else:
             for item in items:
@@ -519,6 +578,12 @@ def render_pdf(
 
     def draw_page(canvas, doc) -> None:
         canvas.saveState()
+        # OFI badge at the top-right on each page.
+        canvas.setStrokeColor(colors.HexColor("#c7b37a"))
+        canvas.circle(A4[0] - doc.rightMargin - 0.9 * cm, A4[1] - 1.0 * cm, 0.45 * cm, stroke=1, fill=0)
+        canvas.setFont("Helvetica-Bold", 8)
+        canvas.setFillColor(colors.HexColor("#3a3a3a"))
+        canvas.drawCentredString(A4[0] - doc.rightMargin - 0.9 * cm, A4[1] - 1.06 * cm, "OFI")
         canvas.setStrokeColor(colors.HexColor("#d1e6e9"))
         canvas.setLineWidth(0.8)
         canvas.line(doc.leftMargin, A4[1] - 1.15 * cm, A4[0] - doc.rightMargin, A4[1] - 1.15 * cm)
@@ -539,5 +604,80 @@ def _escape_paragraph(value: str) -> str:
     return escaped.replace("\n", "<br/>")
 
 
+def render_docx(
+    *,
+    title: str,
+    client_name: str,
+    source_text: str,
+    summary: str,
+    scope: list[str],
+    deliverables: list[str],
+    timeline: list[str],
+    notes: list[str],
+    timestamp: str,
+) -> bytes:
+    document = Document()
+    header = document.sections[0].header
+    header_paragraph = header.paragraphs[0] if header.paragraphs else header.add_paragraph()
+    header_paragraph.alignment = 2
+    header_run = header_paragraph.add_run("OFI")
+    header_run.bold = True
+    document.add_heading(title, level=1)
+    if client_name:
+        document.add_paragraph(f"Client: {client_name}")
+    document.add_paragraph(f"Version: 1.0")
+    document.add_paragraph(f"Generated: {timestamp}")
+
+    document.add_page_break()
+    document.add_heading("Contents", level=1)
+    for item in [
+        "Data Integration",
+        "Studio",
+        "Business Logic",
+        "Main KPIs",
+        "Filter dimensions",
+        "Business dimensions",
+        "Control Version",
+    ]:
+        document.add_paragraph(item, style="List Bullet")
+
+    def add_section(section_title: str, items: list[str], bullet: bool = False) -> None:
+        document.add_heading(section_title, level=2)
+        if bullet:
+            for item in items:
+                document.add_paragraph(item, style="List Bullet")
+        else:
+            document.add_paragraph(items[0] if items else "")
+
+    add_section("Data Integration", [summary])
+    add_section("Studio", [_fallback_studio_text(summary, scope, deliverables)])
+    add_section("Business Logic", scope, bullet=True)
+    add_section("Main KPIs", deliverables, bullet=True)
+    add_section("Filter dimensions", timeline, bullet=True)
+    add_section("Business dimensions", notes, bullet=True)
+    add_section("Control Version", ["1.0"]) 
+
+    buffer = io.BytesIO()
+    document.save(buffer)
+    return buffer.getvalue()
+
+
 def pdf_base64(pdf_bytes: bytes) -> str:
     return base64.b64encode(pdf_bytes).decode("ascii")
+
+
+def docx_base64(docx_bytes: bytes) -> str:
+    return base64.b64encode(docx_bytes).decode("ascii")
+
+
+def _fallback_studio_text(summary: str, scope: list[str], deliverables: list[str]) -> str:
+    studio_parts: list[str] = []
+    if summary.strip():
+        studio_parts.append(summary.strip())
+    if scope:
+        studio_parts.append(f"Focus areas: {', '.join(scope[:3])}.")
+    if deliverables:
+        studio_parts.append(f"Primary assets: {', '.join(deliverables[:3])}.")
+    if not studio_parts:
+        return "This section summarizes the extracted studio-level implementation context."
+    return " ".join(studio_parts)

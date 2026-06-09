@@ -7,7 +7,7 @@ from rest_framework.response import Response
 from rest_framework.views import APIView
 
 from apps.documents.api.serializers import DocumentGenerationSerializer
-from apps.documents.services import build_document_payload, pdf_base64
+from apps.documents.services import build_document_payload, docx_base64, pdf_base64
 
 
 class DocumentPreviewView(APIView):
@@ -36,7 +36,9 @@ class DocumentPreviewView(APIView):
                 "generation_mode": document.generation_mode,
                 "latex_source": document.latex_source,
                 "pdf_base64": pdf_base64(document.pdf_bytes),
+                "docx_base64": docx_base64(document.docx_bytes),
                 "filename": f"{document.filename}.pdf",
+                "docx_filename": f"{document.filename}.docx",
             },
             status=status.HTTP_200_OK,
         )
