@@ -3,25 +3,54 @@
 }
 
 :root {
-  color: #0f172a;
-  background:
-    radial-gradient(circle at top left, rgba(14, 116, 144, 0.12), transparent 30%),
-    radial-gradient(circle at bottom right, rgba(251, 146, 60, 0.1), transparent 28%),
-    #f4f7fb;
-  font-family: 'Trebuchet MS', 'Segoe UI', sans-serif;
+  --background: #050505;
+  --background-elevated: #0b0b0b;
+  --background-panel: #111111;
+  --foreground: #f5f5f5;
+  --muted: #c7c6c3;
+  --muted-strong: #d5d5d5;
+  --border: rgba(255, 255, 255, 0.1);
+  --border-strong: rgba(215, 170, 58, 0.28);
+  --accent: #d7aa3a;
+  --accent-strong: #e0bb53;
+  --accent-soft: rgba(215, 170, 58, 0.12);
+  --danger-soft: rgba(127, 29, 29, 0.25);
+  --danger-text: #fecaca;
+  color: var(--foreground);
+  background: var(--background);
+  font-family: 'Geist', 'Segoe UI', sans-serif;
   font-synthesis: none;
   text-rendering: optimizeLegibility;
   -webkit-font-smoothing: antialiased;
   -moz-osx-font-smoothing: grayscale;
 }
 
+@font-face {
+  font-family: 'Geist';
+  src: url('../node_modules/geist/dist/fonts/geist-sans/Geist-Variable.woff2') format('woff2');
+  font-style: normal;
+  font-weight: 100 900;
+  font-display: swap;
+}
+
+@font-face {
+  font-family: 'Geist Mono';
+  src: url('../node_modules/geist/dist/fonts/geist-mono/GeistMono-Variable.woff2') format('woff2');
+  font-style: normal;
+  font-weight: 100 900;
+  font-display: swap;
+}
+
 html {
   min-height: 100%;
+  background: var(--background);
 }
 
 body {
   margin: 0;
   min-height: 100vh;
+  background: var(--background);
+  color: var(--foreground);
 }
 
 body,

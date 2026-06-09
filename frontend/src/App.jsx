@@ -156,7 +156,6 @@ export default function App() {
         </div>
 
 
-
       </header>
 
       <main className="workspace-grid">
