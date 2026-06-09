@@ -10,6 +10,8 @@ from datetime import datetime, timezone
 from pathlib import Path
 from typing import Any
 
+from pypdf import PdfReader
+
 from docx import Document
 from docx.shared import Cm
 from django.utils.text import slugify
@@ -57,6 +59,11 @@ class RenderedDocument:
 def build_document_payload(validated_data: dict[str, Any]) -> RenderedDocument:
     source_text = validated_data["source_text"].strip()
     agent_instructions = validated_data.get("agent_instructions", "").strip()
+
+    pdf_texts = extract_pdf_texts(validated_data.get("source_pdfs") or [])
+    if pdf_texts:
+        joined = "\n\n---\n\n".join(pdf_texts)
+        source_text = f"{source_text}\n\n--- Extracted from uploaded PDFs ---\n\n{joined}".strip()
 
     doc_data = generate_document_data(source_text, agent_instructions)
     generation_mode = str(doc_data.get("generation_mode", "fallback"))
@@ -567,5 +574,24 @@ def pdf_base64(pdf_bytes: bytes) -> str:
 
 def docx_base64(docx_bytes: bytes) -> str:
     return base64.b64encode(docx_bytes).decode("ascii")
+
+
+def extract_pdf_texts(pdf_files: list[Any]) -> list[str]:
+    """Extract plain text from a list of uploaded PDF file objects."""
+    texts: list[str] = []
+    for pdf_file in pdf_files:
+        try:
+            pdf_file.seek(0)
+            reader = PdfReader(io.BytesIO(pdf_file.read()))
+            pages = []
+            for page in reader.pages:
+                page_text = page.extract_text() or ""
+                if page_text.strip():
+                    pages.append(page_text.strip())
+            if pages:
+                texts.append("\n\n".join(pages))
+        except Exception:
+            pass
+    return texts
 
 

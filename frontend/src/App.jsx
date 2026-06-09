@@ -57,6 +57,7 @@ export default function App() {
   const [sourceText, setSourceText] = useState(DEFAULT_TRANSCRIPT)
   const [agentInstructions, setAgentInstructions] = useState('')
   const [logoFile, setLogoFile] = useState(null)
+  const [pdfFiles, setPdfFiles] = useState([])
   const [preview, setPreview] = useState(null)
   const [isGenerating, setIsGenerating] = useState(false)
   const [error, setError] = useState('')
@@ -93,6 +94,10 @@ export default function App() {
       if (logoFile) {
         payload.append('logo', logoFile)
       }
+
+      pdfFiles.forEach((file) => {
+        payload.append('source_pdfs', file)
+      })
 
       const response = await fetch(`${API_BASE_URL}/api/documents/preview/`, {
         method: 'POST',
@@ -185,6 +190,29 @@ export default function App() {
 
               <label className="field-group field-group--file">
                 <span className="field-label">
+                  <Upload size={14} /> Reference PDFs (optional)
+                </span>
+                <input
+                  className="creator-file"
+                  type="file"
+                  accept="application/pdf"
+                  multiple
+                  onChange={(event) => setPdfFiles(Array.from(event.target.files || []))}
+                />
+                <span className="field-note">
+                  Upload one or more PDF documents. The agent will read them and incorporate their content.
+                </span>
+                {pdfFiles.length > 0 ? (
+                  <div className="file-pills">
+                    {pdfFiles.map((file) => (
+                      <span key={file.name} className="file-pill">{file.name}</span>
+                    ))}
+                  </div>
+                ) : null}
+              </label>
+
+              <label className="field-group field-group--file">
+                <span className="field-label">
                   <Upload size={14} /> Client logo, optional
                 </span>
                 <input className="creator-file" type="file" accept="image/png,image/jpeg,image/webp" onChange={handleLogoChange} />
@@ -197,7 +225,6 @@ export default function App() {
                   {isGenerating ? <LoaderCircle size={16} className="spin" /> : <ArrowDownToLine size={16} />}
                   {isGenerating ? 'Generating PDF...' : 'Generate preview'}
                 </button>
-
               </div>
             </form>
           </SectionCard>

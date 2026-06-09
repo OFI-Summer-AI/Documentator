@@ -248,6 +248,12 @@
   font-weight: 700;
 }
 
+.file-pills {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 6px;
+}
+
 .action-row {
   display: flex;
   flex-wrap: wrap;

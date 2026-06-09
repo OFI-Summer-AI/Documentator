@@ -7,7 +7,7 @@ from rest_framework.response import Response
 from rest_framework.views import APIView
 
 from apps.documents.api.serializers import DocumentGenerationSerializer
-from apps.documents.services import build_document_payload, docx_base64, pdf_base64
+from apps.documents.services import build_document_payload, docx_base64, extract_pdf_texts, pdf_base64
 
 
 class DocumentPreviewView(APIView):
@@ -17,8 +17,9 @@ class DocumentPreviewView(APIView):
     def post(self, request, *args, **kwargs):
         serializer = DocumentGenerationSerializer(data=request.data)
         serializer.is_valid(raise_exception=True)
-
-        document = build_document_payload(serializer.validated_data)
+        validated = dict(serializer.validated_data)
+        validated["source_pdfs"] = request.FILES.getlist("source_pdfs")
+        document = build_document_payload(validated)
         section_names = [str(s.get("title", "")) for s in document.document_sections]
         return Response(
             {
