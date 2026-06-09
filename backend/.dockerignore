@@ -1,0 +1,45 @@
+# Git
+.git/
+.gitignore
+
+# Python caches and artifacts
+__pycache__/
+*.py[cod]
+*.pyo
+*.pyd
+*.so
+.pytest_cache/
+.mypy_cache/
+.ruff_cache/
+.coverage
+htmlcov/
+
+# Virtual environments
+.venv/
+venv/
+env/
+
+# Local environment files and secrets
+.env
+.env.*
+!.env.example
+
+# Django runtime files
+db.sqlite3
+db.sqlite3-journal
+media/
+staticfiles/
+
+# IDE/editor
+.vscode/
+.idea/
+
+# OS files
+.DS_Store
+Thumbs.db
+
+# Logs
+*.log
+
+# Docker compose is not needed in build context
+docker-compose.yml
