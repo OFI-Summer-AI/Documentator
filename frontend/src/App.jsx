@@ -150,16 +150,8 @@ export default function App() {
           </p>
         </div>
 
-        <div className="hero__summary">
-          <div className="hero__summary-badge">
-            <Wand2 size={16} /> LLM-driven flow
-          </div>
-          <ul>
-            <li>One big text field</li>
-            <li>OpenAI-generated structure</li>
-            <li>PDF preview and download</li>
-          </ul>
-        </div>
+
+
       </header>
 
       <main className="workspace-grid">
@@ -206,7 +198,7 @@ export default function App() {
                   {isGenerating ? 'Generating PDF...' : 'Generate preview'}
                 </button>
                 <span className="action-note">
-                  OpenAI generates the document structure and LaTeX source on the backend.
+                  OpenAI generates the content and selects the most relevant sections automatically.
                 </span>
               </div>
             </form>
@@ -257,6 +249,10 @@ export default function App() {
                   <article>
                     <p className="preview-label">Source length</p>
                     <strong>{preview.document.source_text?.split(/\s+/).filter(Boolean).length || 0} words</strong>
+                  </article>
+                  <article>
+                    <p className="preview-label">Sections</p>
+                    <strong>{preview.document.sections?.length || 0}</strong>
                   </article>
                 </div>
 

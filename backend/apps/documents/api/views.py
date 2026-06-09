@@ -26,6 +26,7 @@ class DocumentPreviewView(APIView):
                     "title": document.title,
                     "client_name": document.client_name,
                     "source_text": document.source_text,
+                    "sections": document.sections,
                     "summary": document.summary,
                     "scope": document.scope,
                     "deliverables": document.deliverables,
