@@ -1,4 +1,4 @@
-﻿from __future__ import annotations
+from __future__ import annotations
 
 import base64
 import json
@@ -66,7 +66,19 @@ def build_document_payload(validated_data: dict[str, Any]) -> RenderedDocument:
         joined = "\n\n---\n\n".join(pdf_texts)
         source_text = f"{source_text}\n\n--- Extracted from uploaded PDFs ---\n\n{joined}".strip()
 
-    doc_data = generate_document_data(source_text, agent_instructions, document_language)
+    # Read uploaded images into memory before any async/generator usage
+    source_images = validated_data.get("source_images") or []
+    image_descriptions = validated_data.get("image_descriptions") or []
+    image_data: list[dict[str, Any]] = []
+    for i, img_file in enumerate(source_images):
+        desc = image_descriptions[i] if i < len(image_descriptions) else ""
+        try:
+            img_file.seek(0)
+            image_data.append({"bytes": img_file.read(), "description": str(desc).strip()})
+        except Exception:
+            pass
+
+    doc_data = generate_document_data(source_text, agent_instructions, document_language, image_data)
     generation_mode = str(doc_data.get("generation_mode", "fallback"))
     title = str(doc_data.get("title", "")).strip() or _fallback_title(source_text)
     client_name = str(doc_data.get("client_name", "")).strip()
@@ -74,10 +86,10 @@ def build_document_payload(validated_data: dict[str, Any]) -> RenderedDocument:
     latex_source = str(doc_data.get("latex_source", "")).strip()
 
     if not document_sections:
-        document_sections = _fallback_sections(source_text, document_language)
+        document_sections = _fallback_sections(source_text, document_language, image_data)
 
     if not latex_source:
-        latex_source = _build_latex(title, client_name, document_sections, document_language)
+        latex_source = _build_latex(title, client_name, document_sections, document_language, image_data)
 
     filename = slugify(title) or "documentation"
     timestamp = datetime.now(timezone.utc).strftime("%Y-%m-%d %H:%M UTC")
@@ -90,6 +102,7 @@ def build_document_payload(validated_data: dict[str, Any]) -> RenderedDocument:
         document_language=document_language,
         logo=validated_data.get("logo"),
         timestamp=timestamp,
+        image_data=image_data,
     )
     docx_bytes = render_docx(
         title=title,
@@ -97,6 +110,7 @@ def build_document_payload(validated_data: dict[str, Any]) -> RenderedDocument:
         document_sections=document_sections,
         document_language=document_language,
         timestamp=timestamp,
+        image_data=image_data,
     )
 
     return RenderedDocument(
@@ -137,19 +151,25 @@ _SYSTEM_PROMPT = (
     '  "document_sections": [\n'
     '    {"title": "<section title>", "type": "paragraph", "content": "<synthesised prose>"},\n'
     '    {"title": "<section title>", "type": "bullets", "content": ["<item>", "<item>"]},\n'
-    '    {"title": "<section title>", "type": "table", "content": {"headers": ["<col1>", "<col2>"], "rows": [["<val>", "<val>"]]}}\n'
+    '    {"title": "<section title>", "type": "table", "content": {"headers": ["<col1>", "<col2>"], "rows": [["<val>", "<val>"]]}},\n'
+    '    {"title": "", "type": "figure", "content": {"figure_index": 0, "figure_number": 1, "caption": "<Figure N: descriptive caption>"}}\n'
     '  ],\n'
     '  "latex_source": "<complete compilable LaTeX document>"\n'
     '}'
 )
 
 
-def generate_document_data(source_text: str, agent_instructions: str = "", document_language: str = "en") -> dict[str, Any]:
+def generate_document_data(
+    source_text: str,
+    agent_instructions: str = "",
+    document_language: str = "en",
+    image_data: list[dict[str, Any]] | None = None,
+) -> dict[str, Any]:
     api_key = _env_value("OPENAI_API_KEY")
     model = _env_value("OPENAI_MODEL", default="gpt-4.1-mini")
 
     if not api_key:
-        return _fallback_document_data(source_text, document_language)
+        return _fallback_document_data(source_text, document_language, image_data or [])
 
     try:
         client = OpenAI(api_key=api_key)
@@ -162,6 +182,23 @@ def generate_document_data(source_text: str, agent_instructions: str = "", docum
                 f"Detected language preference: {document_language}."
             ),
         })
+        if image_data:
+            img_list = "\n".join(
+                f"  - Image {i} (figure_index={i}): {d['description'] or '(no description provided)'}"
+                for i, d in enumerate(image_data)
+            )
+            messages.append({
+                "role": "system",
+                "content": (
+                    f"The user has uploaded {len(image_data)} image(s) to include in the document:\n{img_list}\n\n"
+                    "You MUST place every image in the document at the most contextually appropriate location "
+                    "using sections of type 'figure'. Insert them between other sections where they best support "
+                    "the surrounding content. Generate a professional caption for each figure — it does not have "
+                    "to match the user's description verbatim. Number figures sequentially starting at 1.\n"
+                    'Example figure section: {"title": "", "type": "figure", "content": '
+                    '{"figure_index": 0, "figure_number": 1, "caption": "Figure 1: Overview of the proposed architecture"}}'
+                ),
+            })
         if agent_instructions:
             messages.append({"role": "system", "content": f"Additional author instructions: {agent_instructions}"})
         messages.append({"role": "user", "content": source_text})
@@ -175,26 +212,33 @@ def generate_document_data(source_text: str, agent_instructions: str = "", docum
         raw = response.choices[0].message.content or "{}"
         parsed = json.loads(raw)
         parsed["generation_mode"] = "openai"
-        parsed["document_sections"] = _normalise_sections(parsed.get("document_sections", []), source_text, document_language)
+        parsed["document_sections"] = _normalise_sections(
+            parsed.get("document_sections", []), source_text, document_language, image_data or []
+        )
         return parsed
     except Exception:
-        return _fallback_document_data(source_text, document_language)
+        return _fallback_document_data(source_text, document_language, image_data or [])
 
 
 # ---------------------------------------------------------------------------
 # Section normalisation & fallback
 # ---------------------------------------------------------------------------
 
-def _normalise_sections(raw: Any, source_text: str, document_language: str) -> list[DocSection]:
+def _normalise_sections(
+    raw: Any,
+    source_text: str,
+    document_language: str,
+    image_data: list[dict[str, Any]],
+) -> list[DocSection]:
     if not isinstance(raw, list):
-        return _fallback_sections(source_text, document_language)
+        return _fallback_sections(source_text, document_language, image_data)
 
     sections: list[DocSection] = []
     for item in raw:
         if not isinstance(item, dict):
             continue
         sec_type = str(item.get("type", "paragraph")).strip().lower()
-        title = str(item.get("title", "Section")).strip()
+        title = str(item.get("title", "")).strip()
         content = item.get("content", "")
 
         if sec_type == "bullets":
@@ -209,6 +253,21 @@ def _normalise_sections(raw: Any, source_text: str, document_language: str) -> l
             if not headers:
                 continue
             content = {"headers": headers, "rows": rows}
+        elif sec_type == "figure":
+            if not isinstance(content, dict):
+                continue
+            try:
+                figure_index = int(content.get("figure_index", 0))
+            except (TypeError, ValueError):
+                figure_index = 0
+            try:
+                figure_number = int(content.get("figure_number", 1))
+            except (TypeError, ValueError):
+                figure_number = 1
+            caption = str(content.get("caption", f"Figure {figure_number}")).strip()
+            if figure_index >= len(image_data):
+                continue
+            content = {"figure_index": figure_index, "figure_number": figure_number, "caption": caption}
         else:
             sec_type = "paragraph"
             content = str(content).strip()
@@ -217,32 +276,48 @@ def _normalise_sections(raw: Any, source_text: str, document_language: str) -> l
 
         sections.append({"title": title, "type": sec_type, "content": content})
 
-    return sections if sections else _fallback_sections(source_text, document_language)
+    return sections if sections else _fallback_sections(source_text, document_language, image_data)
 
 
-def _fallback_sections(source_text: str, document_language: str) -> list[DocSection]:
+def _fallback_sections(
+    source_text: str,
+    document_language: str,
+    image_data: list[dict[str, Any]] | None = None,
+) -> list[DocSection]:
     summary = _fallback_summary(source_text)
     lines = _extract_lines(source_text)[:6] or ["See source context for details."]
     labels = localized_labels(document_language)
-    return [
+    sections: list[DocSection] = [
         {"title": labels["executive_summary"], "type": "paragraph", "content": summary},
         {"title": labels["key_points"], "type": "bullets", "content": lines},
-        {
-            "title": labels["version_control"],
-            "type": "table",
-            "content": {
-                "headers": labels["version_headers"],
-                "rows": [["1.0", datetime.now(timezone.utc).strftime("%Y-%m-%d"), "", labels["initial_draft"]]],
-            },
-        },
     ]
+    for i, img in enumerate(image_data or []):
+        caption = f"Figure {i + 1}: {img['description']}" if img["description"] else f"Figure {i + 1}"
+        sections.append({
+            "title": "",
+            "type": "figure",
+            "content": {"figure_index": i, "figure_number": i + 1, "caption": caption},
+        })
+    sections.append({
+        "title": labels["version_control"],
+        "type": "table",
+        "content": {
+            "headers": labels["version_headers"],
+            "rows": [["1.0", datetime.now(timezone.utc).strftime("%Y-%m-%d"), "", labels["initial_draft"]]],
+        },
+    })
+    return sections
 
 
-def _fallback_document_data(source_text: str, document_language: str) -> dict[str, Any]:
+def _fallback_document_data(
+    source_text: str,
+    document_language: str,
+    image_data: list[dict[str, Any]] | None = None,
+) -> dict[str, Any]:
     title = _fallback_title(source_text)
     client_name = _fallback_client_name(source_text)
-    document_sections = _fallback_sections(source_text, document_language)
-    latex_source = _build_latex(title, client_name, document_sections, document_language)
+    document_sections = _fallback_sections(source_text, document_language, image_data)
+    latex_source = _build_latex(title, client_name, document_sections, document_language, image_data or [])
     return {
         "title": title,
         "client_name": client_name,
@@ -256,21 +331,43 @@ def _fallback_document_data(source_text: str, document_language: str) -> dict[st
 # LaTeX generation
 # ---------------------------------------------------------------------------
 
-def _build_latex(title: str, client_name: str, document_sections: list[DocSection], document_language: str) -> str:
+def _build_latex(
+    title: str,
+    client_name: str,
+    document_sections: list[DocSection],
+    document_language: str,
+    image_data: list[dict[str, Any]] | None = None,
+) -> str:
     logo_path = resolve_ofi_logo_path()
     labels = localized_labels(document_language)
     ofi_logo_block = "\\includegraphics[width=1.8cm]{ofi-logo}" if logo_path else "\\fbox{\\textbf{OFI}}"
     client_line = f"\\textbf{{{_le(labels['client'])}}}: {_le(client_name)}\\\\" if client_name else ""
 
-    toc_items = "\n".join(f"\\item {_le(str(sec.get('title', '')))}" for sec in document_sections)
+    toc_items = "\n".join(
+        f"\\item {_le(str(sec.get('title', '')))}"
+        for sec in document_sections
+        if sec.get("title")
+    )
     body_blocks: list[str] = []
+    has_figures = any(s.get("type") == "figure" for s in document_sections)
 
     for sec in document_sections:
-        sec_title = str(sec.get("title", "Section"))
+        sec_title = str(sec.get("title", ""))
         sec_type = str(sec.get("type", "paragraph"))
         content = sec.get("content", "")
 
-        if sec_type == "bullets":
+        if sec_type == "figure" and isinstance(content, dict):
+            fig_num = content.get("figure_number", 1)
+            caption = content.get("caption", f"Figure {fig_num}")
+            fig_idx = content.get("figure_index", 0)
+            body_blocks.append(
+                f"\\begin{{figure}}[H]\n"
+                f"\\centering\n"
+                f"\\includegraphics[width=0.8\\textwidth]{{figure_{fig_idx}}}\n"
+                f"\\caption{{{_le(caption)}}}\n"
+                f"\\end{{figure}}"
+            )
+        elif sec_type == "bullets":
             items_str = "\n".join(f"\\item {_le(str(b))}" for b in (content if isinstance(content, list) else [str(content)]))
             body_blocks.append(
                 f"\\section*{{{_le(sec_title)}}}\n"
@@ -290,9 +387,13 @@ def _build_latex(title: str, client_name: str, document_sections: list[DocSectio
                 f"\\hline\n\\end{{tabular}}"
             )
         else:
-            body_blocks.append(f"\\section*{{{_le(sec_title)}}}\n{_le(str(content))}")
+            if sec_title:
+                body_blocks.append(f"\\section*{{{_le(sec_title)}}}\n{_le(str(content))}")
+            else:
+                body_blocks.append(_le(str(content)))
 
     body_block = "\n\n".join(body_blocks)
+    float_pkg = "\\usepackage{float}\n" if has_figures else ""
 
     return (
         "\\documentclass[11pt,a4paper]{article}\n"
@@ -300,6 +401,7 @@ def _build_latex(title: str, client_name: str, document_sections: list[DocSectio
         "\\usepackage[T1]{fontenc}\n"
         "\\usepackage[utf8]{inputenc}\n"
         "\\usepackage{graphicx}\n"
+        f"{float_pkg}"
         "\\usepackage{longtable}\n"
         "\\usepackage{booktabs}\n"
         "\\usepackage{enumitem}\n"
@@ -352,7 +454,9 @@ def render_pdf(
     document_language: str,
     logo: Any,
     timestamp: str,
+    image_data: list[dict[str, Any]] | None = None,
 ) -> bytes:
+    image_data = image_data or []
     buffer = io.BytesIO()
     doc = SimpleDocTemplate(
         buffer,
@@ -379,6 +483,9 @@ def render_pdf(
                              textColor=colors.white),
         "td": ParagraphStyle("TD", parent=styles["BodyText"], fontName="Helvetica", fontSize=9.5,
                              textColor=colors.HexColor("#1f2933")),
+        "caption": ParagraphStyle("FigCaption", parent=styles["BodyText"], fontName="Helvetica-Oblique",
+                                  fontSize=9, leading=12, textColor=colors.HexColor("#415d66"),
+                                  alignment=TA_CENTER, spaceAfter=8),
     }
 
     story: list[Any] = []
@@ -412,16 +519,36 @@ def render_pdf(
     # Table of contents
     story.append(Paragraph(labels["contents"], S["h1"]))
     for sec in document_sections:
-        story.append(Paragraph(_p(str(sec.get("title", ""))), S["toc"], bulletText="-"))
+        if sec.get("title"):
+            story.append(Paragraph(_p(str(sec.get("title", ""))), S["toc"], bulletText="-"))
     story.append(Spacer(1, 0.5 * cm))
 
     # Body sections
+    available_width = A4[0] - 3.0 * cm
+
     for sec in document_sections:
         sec_title = str(sec.get("title", ""))
         sec_type = str(sec.get("type", "paragraph"))
         content = sec.get("content")
 
-        story.append(Paragraph(_p(sec_title), S["h1"]))
+        if sec_type == "figure" and isinstance(content, dict):
+            fig_idx = int(content.get("figure_index", 0))
+            caption = str(content.get("caption", ""))
+            if fig_idx < len(image_data):
+                try:
+                    img_buf = io.BytesIO(image_data[fig_idx]["bytes"])
+                    fig_img = Image(img_buf, width=min(13 * cm, available_width), kind="proportional")
+                    story.append(Spacer(1, 0.3 * cm))
+                    story.append(fig_img)
+                    if caption:
+                        story.append(Paragraph(_p(caption), S["caption"]))
+                    story.append(Spacer(1, 0.4 * cm))
+                except Exception:
+                    pass
+            continue
+
+        if sec_title:
+            story.append(Paragraph(_p(sec_title), S["h1"]))
 
         if sec_type == "bullets" and isinstance(content, list):
             for item in content:
@@ -431,7 +558,6 @@ def render_pdf(
             headers = [str(h) for h in content.get("headers", [])]
             rows = [[str(c) for c in row] for row in content.get("rows", [])]
             if headers:
-                available_width = A4[0] - 3.0 * cm
                 col_w = available_width / len(headers)
                 tbl_data = [[Paragraph(_p(h), S["th"]) for h in headers]] + \
                            [[Paragraph(_p(c), S["td"]) for c in row] for row in rows]
@@ -499,7 +625,9 @@ def render_docx(
     document_sections: list[DocSection],
     document_language: str,
     timestamp: str,
+    image_data: list[dict[str, Any]] | None = None,
 ) -> bytes:
+    image_data = image_data or []
     document = Document()
     labels = localized_labels(document_language)
 
@@ -522,14 +650,30 @@ def render_docx(
 
     document.add_heading(labels["contents"], level=1)
     for sec in document_sections:
-        document.add_paragraph(str(sec.get("title", "")), style="List Bullet")
+        if sec.get("title"):
+            document.add_paragraph(str(sec.get("title", "")), style="List Bullet")
 
     for sec in document_sections:
         sec_title = str(sec.get("title", ""))
         sec_type = str(sec.get("type", "paragraph"))
         content = sec.get("content")
 
-        document.add_heading(sec_title, level=2)
+        if sec_type == "figure" and isinstance(content, dict):
+            fig_idx = int(content.get("figure_index", 0))
+            caption = str(content.get("caption", ""))
+            if fig_idx < len(image_data):
+                try:
+                    img_buf = io.BytesIO(image_data[fig_idx]["bytes"])
+                    document.add_picture(img_buf, width=Cm(12))
+                    if caption:
+                        cap_para = document.add_paragraph(caption)
+                        cap_para.alignment = 1  # center
+                except Exception:
+                    pass
+            continue
+
+        if sec_title:
+            document.add_heading(sec_title, level=2)
 
         if sec_type == "bullets" and isinstance(content, list):
             for item in content:
@@ -582,7 +726,7 @@ def _fallback_summary(source_text: str) -> str:
 def _extract_lines(source_text: str) -> list[str]:
     lines = []
     for raw in source_text.splitlines():
-        clean = re.sub(r"^[-*\u2022\d+.\)]\s*", "", raw.strip())
+        clean = re.sub(r"^[-*•\d+.\)]\s*", "", raw.strip())
         if clean:
             lines.append(clean)
     return lines
@@ -666,5 +810,3 @@ def extract_pdf_texts(pdf_files: list[Any]) -> list[str]:
         except Exception:
             pass
     return texts
-
-

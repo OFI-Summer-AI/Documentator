@@ -493,6 +493,79 @@
   line-height: 1.7;
 }
 
+.figure-list {
+  display: grid;
+  gap: 10px;
+  margin-top: 4px;
+}
+
+.figure-item {
+  display: grid;
+  grid-template-columns: 68px 1fr 28px;
+  gap: 10px;
+  align-items: start;
+  padding: 10px;
+  border-radius: 16px;
+  border: 1px solid var(--border);
+  background: rgba(255, 255, 255, 0.04);
+}
+
+.figure-thumb {
+  width: 68px;
+  height: 52px;
+  object-fit: cover;
+  border-radius: 10px;
+  border: 1px solid var(--border);
+}
+
+.figure-desc-wrap {
+  display: grid;
+  gap: 5px;
+}
+
+.figure-desc-input {
+  width: 100%;
+  box-sizing: border-box;
+  padding: 8px 10px;
+  border: 1px solid var(--border);
+  border-radius: 12px;
+  background: rgba(255, 255, 255, 0.05);
+  color: var(--foreground);
+  font: inherit;
+  font-size: 0.88rem;
+  line-height: 1.4;
+  resize: none;
+  transition:
+    border-color 160ms ease,
+    box-shadow 160ms ease;
+}
+
+.figure-desc-input:focus {
+  outline: none;
+  border-color: var(--border-strong);
+  box-shadow: 0 0 0 4px rgba(215, 170, 58, 0.12);
+}
+
+.figure-remove-btn {
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  width: 28px;
+  height: 28px;
+  padding: 0;
+  border: 0;
+  border-radius: 8px;
+  background: rgba(248, 113, 113, 0.12);
+  color: #f87171;
+  cursor: pointer;
+  flex-shrink: 0;
+  transition: background 160ms ease;
+}
+
+.figure-remove-btn:hover {
+  background: rgba(248, 113, 113, 0.24);
+}
+
 @keyframes spin {
   from {
     transform: rotate(0deg);

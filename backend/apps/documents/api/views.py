@@ -1,5 +1,7 @@
 from __future__ import annotations
 
+import json
+
 from rest_framework import status
 from rest_framework.parsers import FormParser, JSONParser, MultiPartParser
 from rest_framework.permissions import AllowAny
@@ -19,6 +21,11 @@ class DocumentPreviewView(APIView):
         serializer.is_valid(raise_exception=True)
         validated = dict(serializer.validated_data)
         validated["source_pdfs"] = request.FILES.getlist("source_pdfs")
+        validated["source_images"] = request.FILES.getlist("source_images")
+        try:
+            validated["image_descriptions"] = json.loads(request.data.get("image_descriptions") or "[]")
+        except (json.JSONDecodeError, TypeError):
+            validated["image_descriptions"] = []
         document = build_document_payload(validated)
         section_names = [str(s.get("title", "")) for s in document.document_sections]
         return Response(

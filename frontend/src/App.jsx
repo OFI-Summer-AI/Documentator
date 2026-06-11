@@ -1,5 +1,5 @@
 import { useEffect, useState } from 'react'
-import { ArrowDownToLine, FileText, Layers3, LoaderCircle, Sparkles, Upload, Wand2 } from 'lucide-react'
+import { ArrowDownToLine, FileText, ImageIcon, Layers3, LoaderCircle, Sparkles, Upload, X } from 'lucide-react'
 import './App.css'
 
 const API_BASE_URL = (import.meta.env.VITE_API_URL || 'http://127.0.0.1:8000').replace(/\/$/, '')
@@ -14,11 +14,9 @@ We discussed the product goals, timeline, approval process, and the need for a c
 function base64ToBlobUrl(base64Value) {
   const binaryString = window.atob(base64Value)
   const bytes = new Uint8Array(binaryString.length)
-
   for (let index = 0; index < binaryString.length; index += 1) {
     bytes[index] = binaryString.charCodeAt(index)
   }
-
   return URL.createObjectURL(new Blob([bytes], { type: 'application/pdf' }))
 }
 
@@ -29,11 +27,9 @@ function textToBlobUrl(textValue) {
 function base64ToDocxBlobUrl(base64Value) {
   const binaryString = window.atob(base64Value)
   const bytes = new Uint8Array(binaryString.length)
-
   for (let index = 0; index < binaryString.length; index += 1) {
     bytes[index] = binaryString.charCodeAt(index)
   }
-
   return URL.createObjectURL(
     new Blob([bytes], {
       type: 'application/vnd.openxmlformats-officedocument.wordprocessingml.document',
@@ -58,27 +54,46 @@ export default function App() {
   const [agentInstructions, setAgentInstructions] = useState('')
   const [logoFile, setLogoFile] = useState(null)
   const [pdfFiles, setPdfFiles] = useState([])
+  const [imageItems, setImageItems] = useState([])
   const [preview, setPreview] = useState(null)
   const [isGenerating, setIsGenerating] = useState(false)
   const [error, setError] = useState('')
 
   useEffect(() => {
     return () => {
-      if (preview?.pdfUrl) {
-        URL.revokeObjectURL(preview.pdfUrl)
-      }
-      if (preview?.texUrl) {
-        URL.revokeObjectURL(preview.texUrl)
-      }
-      if (preview?.docxUrl) {
-        URL.revokeObjectURL(preview.docxUrl)
-      }
+      if (preview?.pdfUrl) URL.revokeObjectURL(preview.pdfUrl)
+      if (preview?.texUrl) URL.revokeObjectURL(preview.texUrl)
+      if (preview?.docxUrl) URL.revokeObjectURL(preview.docxUrl)
     }
   }, [preview?.pdfUrl, preview?.texUrl, preview?.docxUrl])
 
   const handleLogoChange = (event) => {
     const file = event.target.files?.[0] ?? null
     setLogoFile(file)
+  }
+
+  const handleImagesAdd = (event) => {
+    const files = Array.from(event.target.files || [])
+    const newItems = files.map((file) => ({
+      file,
+      description: '',
+      previewUrl: URL.createObjectURL(file),
+    }))
+    setImageItems((prev) => [...prev, ...newItems])
+    event.target.value = ''
+  }
+
+  const handleImageDescriptionChange = (index, value) => {
+    setImageItems((prev) =>
+      prev.map((item, i) => (i === index ? { ...item, description: value } : item)),
+    )
+  }
+
+  const handleImageRemove = (index) => {
+    setImageItems((prev) => {
+      URL.revokeObjectURL(prev[index].previewUrl)
+      return prev.filter((_, i) => i !== index)
+    })
   }
 
   const handleGenerate = async (event) => {
@@ -99,6 +114,11 @@ export default function App() {
         payload.append('source_pdfs', file)
       })
 
+      if (imageItems.length > 0) {
+        payload.append('image_descriptions', JSON.stringify(imageItems.map((item) => item.description)))
+        imageItems.forEach(({ file }) => payload.append('source_images', file))
+      }
+
       const response = await fetch(`${API_BASE_URL}/api/documents/preview/`, {
         method: 'POST',
         body: payload,
@@ -118,7 +138,9 @@ export default function App() {
       const texUrl = textToBlobUrl(responseData.latex_source || '')
       const docxUrl = base64ToDocxBlobUrl(responseData.docx_base64 || '')
       const texFilename = (responseData.filename || 'document.pdf').replace(/\.pdf$/i, '.tex')
-      const docxFilename = responseData.docx_filename || (responseData.filename || 'document.pdf').replace(/\.pdf$/i, '.docx')
+      const docxFilename =
+        responseData.docx_filename ||
+        (responseData.filename || 'document.pdf').replace(/\.pdf$/i, '.docx')
 
       setPreview({
         pdfUrl,
@@ -154,8 +176,6 @@ export default function App() {
             source and documentation text for the PDF preview.
           </p>
         </div>
-
-
       </header>
 
       <main className="workspace-grid">
@@ -210,6 +230,53 @@ export default function App() {
                 ) : null}
               </label>
 
+              <div className="field-group field-group--file">
+                <span className="field-label">
+                  <ImageIcon size={14} /> Figures / Images (optional)
+                </span>
+                <input
+                  className="creator-file"
+                  type="file"
+                  accept="image/png,image/jpeg,image/webp,image/gif"
+                  multiple
+                  onChange={handleImagesAdd}
+                />
+                <span className="field-note">
+                  Upload images to include in the document. Add a description to help the agent place each one at the right spot and generate an appropriate caption.
+                </span>
+                {imageItems.length > 0 && (
+                  <div className="figure-list">
+                    {imageItems.map((item, index) => (
+                      <div key={item.previewUrl} className="figure-item">
+                        <img
+                          className="figure-thumb"
+                          src={item.previewUrl}
+                          alt={`Figure ${index + 1}`}
+                        />
+                        <div className="figure-desc-wrap">
+                          <span className="field-note">Figure {index + 1} — {item.file.name}</span>
+                          <textarea
+                            className="figure-desc-input"
+                            rows={2}
+                            placeholder="Describe what this image shows…"
+                            value={item.description}
+                            onChange={(e) => handleImageDescriptionChange(index, e.target.value)}
+                          />
+                        </div>
+                        <button
+                          type="button"
+                          className="figure-remove-btn"
+                          onClick={() => handleImageRemove(index)}
+                          title="Remove image"
+                        >
+                          <X size={14} />
+                        </button>
+                      </div>
+                    ))}
+                  </div>
+                )}
+              </div>
+
               <label className="field-group field-group--file">
                 <span className="field-label">
                   <Upload size={14} /> Client logo, optional
@@ -260,8 +327,6 @@ export default function App() {
                     title="Generated document preview"
                   />
                 </div>
-
-                
 
                 <details className="latex-panel">
                   <summary>View generated LaTeX source</summary>
