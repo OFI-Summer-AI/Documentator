@@ -2,7 +2,7 @@ import { useEffect, useState } from 'react'
 import { ArrowDownToLine, FileText, ImageIcon, Layers3, LoaderCircle, Sparkles, Upload, X } from 'lucide-react'
 import './App.css'
 
-const API_BASE_URL = (import.meta.env.VITE_API_URL || 'http://127.0.0.1:8000').replace(/\/$/, '')
+const API_BASE_URL = (import.meta.env.VITE_API_URL || 'https://documentator-production.up.railway.app/').replace(/\/$/, '')
 
 const DEFAULT_TRANSCRIPT = `Paste a meeting transcript, workshop notes, or raw requirements here.
 
