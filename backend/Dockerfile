@@ -8,23 +8,33 @@ ENV PYTHONDONTWRITEBYTECODE=1 \
 WORKDIR /app
 
 RUN apt-get update \
+    && apt-get upgrade -y \
     && apt-get install -y --no-install-recommends build-essential libpq-dev \
     && rm -rf /var/lib/apt/lists/*
 
-COPY . .
+# Copy only the backend source so the frontend never bloats the image
+COPY backend/ .
 
 RUN pip install --no-cache-dir --upgrade pip \
-    && if [ -f /app/requirements.txt ]; then \
-        pip install --no-cache-dir -r /app/requirements.txt; \
-    elif [ -f /app/backend/requirements.txt ]; then \
-        pip install --no-cache-dir -r /app/backend/requirements.txt; \
-    else \
-        echo "requirements.txt not found in /app or /app/backend"; \
-        exit 1; \
-    fi
+    && pip install --no-cache-dir -r requirements.txt
+
+# Collect static files at build time so ManifestStaticFilesStorage / whitenoise
+# have the manifest ready before the first request.
+# DATABASE_URL points nowhere — collectstatic does not need a real database.
+RUN DJANGO_SETTINGS_MODULE=config.settings.production \
+    SECRET_KEY=collectstatic-build-placeholder \
+    DATABASE_URL=postgres://localhost/placeholder \
+    python manage.py collectstatic --noinput
 
 EXPOSE 8000
 
-CMD ["sh", "-c", "export DJANGO_SETTINGS_MODULE=${DJANGO_SETTINGS_MODULE:-config.settings.production}; if [ -f /app/manage.py ]; then gunicorn config.wsgi:application --bind 0.0.0.0:${PORT:-8000} --workers 3 --log-file - --access-logfile -; else cd /app/backend && gunicorn config.wsgi:application --bind 0.0.0.0:${PORT:-8000} --workers 3 --log-file - --access-logfile -; fi"]
-
-
+# migrate runs once at container start so the schema is always up to date,
+# then gunicorn takes over.
+CMD ["sh", "-c", \
+  "DJANGO_SETTINGS_MODULE=${DJANGO_SETTINGS_MODULE:-config.settings.production} \
+   python manage.py migrate --noinput && \
+   gunicorn config.wsgi:application \
+     --bind 0.0.0.0:${PORT:-8000} \
+     --workers 3 \
+     --log-file - \
+     --access-logfile -"]
