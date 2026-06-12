@@ -38,5 +38,14 @@ CSRF_COOKIE_SECURE = True
 SECURE_CONTENT_TYPE_NOSNIFF = True
 X_FRAME_OPTIONS = "DENY"
 
+CORS_ALLOWED_ORIGINS = env.list(
+	"CORS_ALLOWED_ORIGINS",
+	default=["https://documentator-omega.vercel.app"],
+)
+CSRF_TRUSTED_ORIGINS = env.list(
+	"CSRF_TRUSTED_ORIGINS",
+	default=["https://documentator-omega.vercel.app"],
+)
+
 MIDDLEWARE = ["whitenoise.middleware.WhiteNoiseMiddleware", *MIDDLEWARE]
 STATICFILES_STORAGE = "django.contrib.staticfiles.storage.ManifestStaticFilesStorage"
