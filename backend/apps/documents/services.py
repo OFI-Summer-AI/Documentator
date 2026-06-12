@@ -5,6 +5,7 @@ import json
 import io
 import os
 import re
+import zipfile
 from dataclasses import dataclass
 from datetime import datetime, timezone
 from pathlib import Path
@@ -48,6 +49,7 @@ class RenderedDocument:
     filename: str
     pdf_bytes: bytes
     docx_bytes: bytes
+    tex_zip_bytes: bytes
     latex_source: str
     generation_mode: str
 
@@ -87,6 +89,8 @@ def build_document_payload(validated_data: dict[str, Any]) -> RenderedDocument:
 
     if not document_sections:
         document_sections = _fallback_sections(source_text, document_language, image_data)
+    elif image_data:
+        document_sections = _ensure_figures(document_sections, image_data)
 
     if not latex_source:
         latex_source = _build_latex(title, client_name, document_sections, document_language, image_data)
@@ -112,6 +116,11 @@ def build_document_payload(validated_data: dict[str, Any]) -> RenderedDocument:
         timestamp=timestamp,
         image_data=image_data,
     )
+    tex_zip_bytes = build_tex_zip(
+        latex_source=latex_source,
+        filename=filename,
+        image_data=image_data,
+    )
 
     return RenderedDocument(
         title=title,
@@ -121,6 +130,7 @@ def build_document_payload(validated_data: dict[str, Any]) -> RenderedDocument:
         filename=filename,
         pdf_bytes=pdf_bytes,
         docx_bytes=docx_bytes,
+        tex_zip_bytes=tex_zip_bytes,
         latex_source=latex_source,
         generation_mode=generation_mode,
     )
@@ -184,19 +194,22 @@ def generate_document_data(
         })
         if image_data:
             img_list = "\n".join(
-                f"  - Image {i} (figure_index={i}): {d['description'] or '(no description provided)'}"
+                f"  - figure_index={i}: {d['description'] or '(no description)'}"
                 for i, d in enumerate(image_data)
             )
             messages.append({
                 "role": "system",
                 "content": (
-                    f"The user has uploaded {len(image_data)} image(s) to include in the document:\n{img_list}\n\n"
-                    "You MUST place every image in the document at the most contextually appropriate location "
-                    "using sections of type 'figure'. Insert them between other sections where they best support "
-                    "the surrounding content. Generate a professional caption for each figure — it does not have "
-                    "to match the user's description verbatim. Number figures sequentially starting at 1.\n"
-                    'Example figure section: {"title": "", "type": "figure", "content": '
-                    '{"figure_index": 0, "figure_number": 1, "caption": "Figure 1: Overview of the proposed architecture"}}'
+                    f"MANDATORY: The user has uploaded {len(image_data)} image(s) that MUST appear in the "
+                    f"document_sections array. Every figure_index from 0 to {len(image_data) - 1} must have "
+                    "exactly one corresponding section of type 'figure' in the output.\n\n"
+                    f"Available images:\n{img_list}\n\n"
+                    "For each image, decide the best position in the document (where the image most supports "
+                    "the surrounding content) and insert a figure section there. Write a professional caption "
+                    "that describes what the image shows — it does not need to copy the user's description verbatim.\n\n"
+                    "Figure section format (title must be empty string):\n"
+                    '{"title": "", "type": "figure", "content": {"figure_index": 0, "figure_number": 1, "caption": "Figure 1: Architecture overview"}}\n\n'
+                    "Number figures sequentially starting at 1. Omitting any image is NOT allowed."
                 ),
             })
         if agent_instructions:
@@ -223,6 +236,36 @@ def generate_document_data(
 # ---------------------------------------------------------------------------
 # Section normalisation & fallback
 # ---------------------------------------------------------------------------
+
+def _ensure_figures(sections: list[DocSection], image_data: list[dict[str, Any]]) -> list[DocSection]:
+    """Guarantee every uploaded image has a figure section in the document.
+    Any image the LLM forgot to place is injected before the last section."""
+    placed = {
+        int(s["content"]["figure_index"])
+        for s in sections
+        if s.get("type") == "figure" and isinstance(s.get("content"), dict)
+    }
+    missing = [i for i in range(len(image_data)) if i not in placed]
+    if not missing:
+        return sections
+
+    # Count already-placed figures to continue numbering correctly
+    next_fig_num = sum(1 for s in sections if s.get("type") == "figure") + 1
+    inject = []
+    for i in missing:
+        img = image_data[i]
+        caption = f"Figure {next_fig_num}: {img['description']}" if img["description"] else f"Figure {next_fig_num}"
+        inject.append({
+            "title": "",
+            "type": "figure",
+            "content": {"figure_index": i, "figure_number": next_fig_num, "caption": caption},
+        })
+        next_fig_num += 1
+
+    # Insert before the last section (typically the version control table)
+    insert_pos = max(len(sections) - 1, 0)
+    return sections[:insert_pos] + inject + sections[insert_pos:]
+
 
 def _normalise_sections(
     raw: Any,
@@ -421,10 +464,24 @@ def _build_latex(
         f"\\section*{{{_le(labels['contents'])}}}\n"
         "\\begin{itemize}[leftmargin=1.2em]\n"
         f"{toc_items}\n"
-        "\\end{itemize}\n\n"
+        "\\end{itemize}\n"
+        "\\newpage\n\n"
         f"{body_block}\n"
         "\\end{document}\n"
     )
+
+
+def _to_png_bytes(raw: bytes) -> bytes:
+    """Normalise any PIL-readable image to PNG so reportlab and python-docx never choke."""
+    from PIL import Image as PILImage
+    buf = io.BytesIO(raw)
+    img = PILImage.open(buf)
+    img.load()
+    if img.mode not in ("RGB", "RGBA", "L"):
+        img = img.convert("RGBA")
+    out = io.BytesIO()
+    img.save(out, format="PNG")
+    return out.getvalue()
 
 
 def _le(value: str) -> str:
@@ -516,12 +573,12 @@ def render_pdf(
     story.append(Paragraph(_p(f"{labels['version']} 1.0  |  {timestamp}"), S["subtitle"]))
     story.append(PageBreak())
 
-    # Table of contents
+    # Table of contents — own page
     story.append(Paragraph(labels["contents"], S["h1"]))
     for sec in document_sections:
         if sec.get("title"):
             story.append(Paragraph(_p(str(sec.get("title", ""))), S["toc"], bulletText="-"))
-    story.append(Spacer(1, 0.5 * cm))
+    story.append(PageBreak())
 
     # Body sections
     available_width = A4[0] - 3.0 * cm
@@ -534,17 +591,17 @@ def render_pdf(
         if sec_type == "figure" and isinstance(content, dict):
             fig_idx = int(content.get("figure_index", 0))
             caption = str(content.get("caption", ""))
+            story.append(Spacer(1, 0.3 * cm))
             if fig_idx < len(image_data):
                 try:
-                    img_buf = io.BytesIO(image_data[fig_idx]["bytes"])
-                    fig_img = Image(img_buf, width=min(13 * cm, available_width), kind="proportional")
-                    story.append(Spacer(1, 0.3 * cm))
+                    img_bytes = _to_png_bytes(image_data[fig_idx]["bytes"])
+                    fig_img = Image(io.BytesIO(img_bytes), width=min(13 * cm, available_width), kind="proportional")
                     story.append(fig_img)
-                    if caption:
-                        story.append(Paragraph(_p(caption), S["caption"]))
-                    story.append(Spacer(1, 0.4 * cm))
                 except Exception:
-                    pass
+                    pass  # image unreadable; caption still renders below
+            if caption:
+                story.append(Paragraph(_p(caption), S["caption"]))
+            story.append(Spacer(1, 0.4 * cm))
             continue
 
         if sec_title:
@@ -652,6 +709,7 @@ def render_docx(
     for sec in document_sections:
         if sec.get("title"):
             document.add_paragraph(str(sec.get("title", "")), style="List Bullet")
+    document.add_page_break()
 
     for sec in document_sections:
         sec_title = str(sec.get("title", ""))
@@ -663,13 +721,13 @@ def render_docx(
             caption = str(content.get("caption", ""))
             if fig_idx < len(image_data):
                 try:
-                    img_buf = io.BytesIO(image_data[fig_idx]["bytes"])
-                    document.add_picture(img_buf, width=Cm(12))
-                    if caption:
-                        cap_para = document.add_paragraph(caption)
-                        cap_para.alignment = 1  # center
+                    img_bytes = _to_png_bytes(image_data[fig_idx]["bytes"])
+                    document.add_picture(io.BytesIO(img_bytes), width=Cm(12))
                 except Exception:
-                    pass
+                    pass  # image unreadable; caption still renders below
+            if caption:
+                cap_para = document.add_paragraph(caption)
+                cap_para.alignment = 1  # center
             continue
 
         if sec_title:
@@ -732,12 +790,47 @@ def _extract_lines(source_text: str) -> list[str]:
     return lines
 
 
+def build_tex_zip(
+    latex_source: str,
+    filename: str,
+    image_data: list[dict[str, Any]],
+) -> bytes:
+    """Bundle LaTeX source + all referenced images into a self-contained zip."""
+    tex_name = f"{filename}.tex"
+    buf = io.BytesIO()
+    with zipfile.ZipFile(buf, "w", zipfile.ZIP_DEFLATED) as zf:
+        zf.writestr(tex_name, latex_source.encode("utf-8"))
+
+        for i, img in enumerate(image_data):
+            try:
+                zf.writestr(f"figure_{i}.png", _to_png_bytes(img["bytes"]))
+            except Exception:
+                pass
+
+        logo_path = resolve_ofi_logo_path()
+        if logo_path and logo_path.exists():
+            try:
+                with open(logo_path, "rb") as f:
+                    zf.writestr("ofi-logo.png", _to_png_bytes(f.read()))
+            except Exception:
+                pass
+
+        zf.writestr("compile.sh", f"#!/bin/bash\npdflatex {tex_name}\npdflatex {tex_name}\n")
+        zf.writestr("compile.bat", f"@echo off\npdflatex {tex_name}\npdflatex {tex_name}\n")
+
+    return buf.getvalue()
+
+
 def pdf_base64(pdf_bytes: bytes) -> str:
     return base64.b64encode(pdf_bytes).decode("ascii")
 
 
 def docx_base64(docx_bytes: bytes) -> str:
     return base64.b64encode(docx_bytes).decode("ascii")
+
+
+def tex_zip_base64(tex_zip_bytes: bytes) -> str:
+    return base64.b64encode(tex_zip_bytes).decode("ascii")
 
 
 def detect_document_language(source_text: str, agent_instructions: str = "") -> str:

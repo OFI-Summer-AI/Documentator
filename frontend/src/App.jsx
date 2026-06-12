@@ -20,8 +20,13 @@ function base64ToBlobUrl(base64Value) {
   return URL.createObjectURL(new Blob([bytes], { type: 'application/pdf' }))
 }
 
-function textToBlobUrl(textValue) {
-  return URL.createObjectURL(new Blob([textValue], { type: 'text/x-tex;charset=utf-8' }))
+function base64ToZipBlobUrl(base64Value) {
+  const binaryString = window.atob(base64Value)
+  const bytes = new Uint8Array(binaryString.length)
+  for (let index = 0; index < binaryString.length; index += 1) {
+    bytes[index] = binaryString.charCodeAt(index)
+  }
+  return URL.createObjectURL(new Blob([bytes], { type: 'application/zip' }))
 }
 
 function base64ToDocxBlobUrl(base64Value) {
@@ -62,10 +67,10 @@ export default function App() {
   useEffect(() => {
     return () => {
       if (preview?.pdfUrl) URL.revokeObjectURL(preview.pdfUrl)
-      if (preview?.texUrl) URL.revokeObjectURL(preview.texUrl)
+      if (preview?.texZipUrl) URL.revokeObjectURL(preview.texZipUrl)
       if (preview?.docxUrl) URL.revokeObjectURL(preview.docxUrl)
     }
-  }, [preview?.pdfUrl, preview?.texUrl, preview?.docxUrl])
+  }, [preview?.pdfUrl, preview?.texZipUrl, preview?.docxUrl])
 
   const handleLogoChange = (event) => {
     const file = event.target.files?.[0] ?? null
@@ -135,18 +140,18 @@ export default function App() {
       }
 
       const pdfUrl = base64ToBlobUrl(responseData.pdf_base64)
-      const texUrl = textToBlobUrl(responseData.latex_source || '')
+      const texZipUrl = base64ToZipBlobUrl(responseData.tex_zip_base64 || '')
       const docxUrl = base64ToDocxBlobUrl(responseData.docx_base64 || '')
-      const texFilename = (responseData.filename || 'document.pdf').replace(/\.pdf$/i, '.tex')
+      const texZipFilename = responseData.tex_zip_filename || 'document-latex.zip'
       const docxFilename =
         responseData.docx_filename ||
         (responseData.filename || 'document.pdf').replace(/\.pdf$/i, '.docx')
 
       setPreview({
         pdfUrl,
-        texUrl,
+        texZipUrl,
         docxUrl,
-        texFilename,
+        texZipFilename,
         docxFilename,
         filename: responseData.filename,
         document: responseData.document,
@@ -314,8 +319,8 @@ export default function App() {
                     <a className="secondary-button" href={preview.docxUrl} download={preview.docxFilename}>
                       <ArrowDownToLine size={16} /> Download Word
                     </a>
-                    <a className="secondary-button" href={preview.texUrl} download={preview.texFilename}>
-                      <ArrowDownToLine size={16} /> Download TEX
+                    <a className="secondary-button" href={preview.texZipUrl} download={preview.texZipFilename}>
+                      <ArrowDownToLine size={16} /> Download LaTeX
                     </a>
                   </div>
                 </div>
