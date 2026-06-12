@@ -78,7 +78,7 @@ ASGI_APPLICATION = "config.asgi.application"
 DATABASES = {
     "default": env.db(
         "DATABASE_URL",
-        default="postgres://postgres:postgres@127.0.0.1:5432/backend_template",
+        default="sqlite:///db.sqlite3",
     ),
 }
 DATABASES["default"]["ATOMIC_REQUESTS"] = True
