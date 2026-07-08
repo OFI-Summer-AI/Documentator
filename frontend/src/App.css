@@ -566,6 +566,268 @@
   background: rgba(248, 113, 113, 0.24);
 }
 
+.options-row {
+  display: flex;
+  align-items: center;
+  gap: 10px;
+  margin-top: 4px;
+  font-size: 0.88rem;
+  color: var(--muted-strong);
+  cursor: pointer;
+}
+
+.options-row input[type='checkbox'] {
+  width: 18px;
+  height: 18px;
+  accent-color: var(--accent);
+  cursor: pointer;
+}
+
+select.creator-field {
+  cursor: pointer;
+  color-scheme: dark;
+  background-color: var(--background-elevated);
+}
+
+select.creator-field option {
+  background-color: var(--background-elevated);
+  color: var(--foreground);
+}
+
+.advanced-options-panel {
+  border-radius: 18px;
+  border: 1px solid var(--border);
+  background: rgba(255, 255, 255, 0.03);
+}
+
+.advanced-options-summary {
+  display: flex;
+  width: 100%;
+  align-items: center;
+  gap: 8px;
+  border: 0;
+  margin: 0;
+  background: transparent;
+  cursor: pointer;
+  padding: 13px 14px;
+  font: inherit;
+  font-size: 0.88rem;
+  font-weight: 700;
+  color: var(--muted-strong);
+  text-align: left;
+}
+
+.advanced-options-chevron {
+  margin-left: auto;
+  color: var(--accent);
+  transition: transform 160ms ease;
+}
+
+.advanced-options-summary[aria-expanded='true'] .advanced-options-chevron {
+  transform: rotate(90deg);
+}
+
+.advanced-options-body {
+  display: grid;
+  gap: 14px;
+  padding: 2px 14px 16px;
+}
+
+.section-editor-list {
+  display: grid;
+  gap: 14px;
+  max-height: 760px;
+  overflow-y: auto;
+  padding-right: 4px;
+}
+
+.section-editor-card {
+  display: grid;
+  gap: 10px;
+  padding: 14px;
+  border-radius: 18px;
+  border: 1px solid var(--border);
+  background: rgba(255, 255, 255, 0.04);
+}
+
+.section-editor-card__header {
+  display: flex;
+  align-items: center;
+  gap: 10px;
+}
+
+.section-editor-card__title {
+  flex: 1;
+  border: 0;
+  background: transparent;
+  color: var(--foreground);
+  font-weight: 800;
+  font-size: 0.98rem;
+  padding: 4px 0;
+}
+
+.section-editor-card__title:focus {
+  outline: none;
+  border-bottom: 1px solid var(--border-strong);
+}
+
+.section-editor-card__title--static {
+  color: var(--muted-strong);
+}
+
+.section-editor-card__type {
+  flex-shrink: 0;
+  padding: 4px 10px;
+  border-radius: 999px;
+  background: rgba(255, 255, 255, 0.06);
+  color: var(--muted);
+  font-size: 0.72rem;
+  font-weight: 700;
+  text-transform: uppercase;
+  letter-spacing: 0.06em;
+}
+
+.section-editor-card__textarea {
+  width: 100%;
+  box-sizing: border-box;
+  resize: vertical;
+  min-height: 84px;
+  padding: 10px 12px;
+  border: 1px solid var(--border);
+  border-radius: 12px;
+  background: rgba(255, 255, 255, 0.05);
+  color: var(--foreground);
+  font: inherit;
+  font-size: 0.9rem;
+  line-height: 1.5;
+}
+
+.section-editor-card__textarea:focus {
+  outline: none;
+  border-color: var(--border-strong);
+  box-shadow: 0 0 0 4px rgba(215, 170, 58, 0.12);
+}
+
+.section-editor-card__figure {
+  display: grid;
+  gap: 8px;
+}
+
+.section-editor-card__caption {
+  width: 100%;
+  box-sizing: border-box;
+  padding: 8px 10px;
+  border: 1px solid var(--border);
+  border-radius: 12px;
+  background: rgba(255, 255, 255, 0.05);
+  color: var(--foreground);
+  font: inherit;
+  font-size: 0.88rem;
+}
+
+.section-editor-card__actions {
+  display: flex;
+  gap: 8px;
+  justify-content: flex-end;
+}
+
+.icon-button {
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  width: 30px;
+  height: 30px;
+  border: 1px solid var(--border);
+  border-radius: 10px;
+  background: rgba(255, 255, 255, 0.05);
+  color: var(--muted-strong);
+  cursor: pointer;
+  transition: background 160ms ease, opacity 160ms ease;
+}
+
+.icon-button:hover {
+  background: rgba(255, 255, 255, 0.1);
+}
+
+.icon-button:disabled {
+  opacity: 0.4;
+  cursor: not-allowed;
+}
+
+.icon-button--danger {
+  color: #f87171;
+}
+
+.icon-button--danger:hover {
+  background: rgba(248, 113, 113, 0.14);
+}
+
+.table-editor {
+  display: grid;
+  gap: 6px;
+}
+
+.table-editor__row {
+  display: flex;
+  gap: 6px;
+  align-items: center;
+}
+
+.table-editor__row--header .table-editor__cell {
+  font-weight: 800;
+  color: var(--foreground);
+}
+
+.table-editor__cell {
+  flex: 1;
+  min-width: 0;
+  padding: 7px 9px;
+  border: 1px solid var(--border);
+  border-radius: 10px;
+  background: rgba(255, 255, 255, 0.05);
+  color: var(--foreground);
+  font: inherit;
+  font-size: 0.85rem;
+}
+
+.table-editor__cell:focus {
+  outline: none;
+  border-color: var(--border-strong);
+}
+
+.table-editor__remove-row {
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  width: 24px;
+  height: 24px;
+  flex-shrink: 0;
+  border: 0;
+  border-radius: 8px;
+  background: rgba(248, 113, 113, 0.12);
+  color: #f87171;
+  cursor: pointer;
+}
+
+.table-editor__add-row {
+  display: inline-flex;
+  align-items: center;
+  gap: 6px;
+  width: fit-content;
+  padding: 6px 10px;
+  border: 1px dashed var(--border);
+  border-radius: 10px;
+  background: transparent;
+  color: var(--muted-strong);
+  font-size: 0.82rem;
+  font-weight: 700;
+  cursor: pointer;
+}
+
+.table-editor__add-row:hover {
+  background: rgba(255, 255, 255, 0.05);
+}
+
 @keyframes spin {
   from {
     transform: rotate(0deg);

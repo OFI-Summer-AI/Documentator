@@ -35,6 +35,93 @@ ASSETS_DIR = Path(__file__).resolve().parents[2] / "assets"
 
 DocSection = dict[str, Any]
 
+_LENGTH_GUIDANCE = {
+    "brief": (
+        "Keep the document concise: aim for 3-5 sections total (including the executive summary and version "
+        "control table), short paragraphs (2-4 sentences), and short bullet lists (3-5 items)."
+    ),
+    "standard": (
+        "Aim for a standard business-document length: 5-8 sections total, paragraphs of moderate depth "
+        "(4-8 sentences), and bullet lists sized to the content."
+    ),
+    "detailed": (
+        "Produce a thorough, detailed document: 8-12 sections total, in-depth paragraphs (8+ sentences) with "
+        "supporting detail, and comprehensive bullet/table breakdowns."
+    ),
+}
+
+_TONE_GUIDANCE = {
+    "formal": "Write in a formal, professional register suitable for executive stakeholders.",
+    "consulting": (
+        "Write in a confident management-consulting tone: crisp, structured, benefits-oriented, using "
+        "industry-standard framing."
+    ),
+    "technical": (
+        "Write in a precise technical tone aimed at engineers/architects: exact terminology, specific and "
+        "unambiguous statements."
+    ),
+    "casual": "Write in a clear, approachable tone while still being professional; avoid unnecessary jargon.",
+}
+
+_TEMPLATE_GUIDANCE = {
+    "general": "",
+    "meeting_minutes": (
+        "Structure this as formal meeting minutes. After the executive summary, include (in order): an "
+        "Attendees section (bullets listing attendee names/roles mentioned, or 'Not specified' if none are "
+        "found), a Discussion Summary, an Action Items section (bullets or a table with owner and due date "
+        "when known), and a Decisions Made section if any decisions were mentioned."
+    ),
+    "technical_spec": (
+        "Structure this as a technical specification. After the executive summary, include (in order): "
+        "Overview/Background, Requirements (bullets or a table), Architecture/Design, and Risks & Open "
+        "Questions. Use tables for structured requirements or comparisons."
+    ),
+    "proposal": (
+        "Structure this as a client proposal. After the executive summary, include (in order): Scope of Work, "
+        "Timeline (prefer a table with milestones/dates), Pricing/Investment (a table if figures are "
+        "available, otherwise a short bullets/paragraph placeholder), and Next Steps."
+    ),
+    "status_report": (
+        "Structure this as a project status report. After the executive summary, include (in order): Progress "
+        "Since Last Update, Current Status (consider a status table), Blockers & Risks, and Next Steps."
+    ),
+}
+
+_TEMPLATE_SECTION_LABELS = {
+    "meeting_minutes": ["Attendees", "Discussion Summary", "Action Items"],
+    "technical_spec": ["Overview", "Requirements", "Risks & Open Questions"],
+    "proposal": ["Scope of Work", "Timeline", "Next Steps"],
+    "status_report": ["Progress Since Last Update", "Blockers & Risks", "Next Steps"],
+}
+
+
+def _length_guidance(target_length: str) -> str:
+    return _LENGTH_GUIDANCE.get(target_length, _LENGTH_GUIDANCE["standard"])
+
+
+def _tone_guidance(tone: str) -> str:
+    return _TONE_GUIDANCE.get(tone, _TONE_GUIDANCE["formal"])
+
+
+def _template_guidance(template: str) -> str:
+    return _TEMPLATE_GUIDANCE.get(template, "")
+
+
+def _apply_max_sections(sections: list[DocSection], max_sections: int | None) -> list[DocSection]:
+    """Trim a section list down to max_sections, always preserving figures and the final section
+    (typically the version-control table)."""
+    if not max_sections or len(sections) <= max_sections:
+        return sections
+
+    protected_ids = {id(s) for s in sections if s.get("type") == "figure"}
+    if sections:
+        protected_ids.add(id(sections[-1]))
+
+    fillable = [s for s in sections if id(s) not in protected_ids]
+    budget = max(max_sections - len(protected_ids), 0)
+    keep_ids = {id(s) for s in fillable[:budget]} | protected_ids
+    return [s for s in sections if id(s) in keep_ids]
+
 
 # ---------------------------------------------------------------------------
 # Data model
@@ -58,7 +145,21 @@ class RenderedDocument:
 # Entry point
 # ---------------------------------------------------------------------------
 
-def build_document_payload(validated_data: dict[str, Any]) -> RenderedDocument:
+def read_image_data(source_images: list[Any], image_descriptions: list[Any]) -> list[dict[str, Any]]:
+    image_data: list[dict[str, Any]] = []
+    for i, img_file in enumerate(source_images):
+        desc = image_descriptions[i] if i < len(image_descriptions) else ""
+        try:
+            img_file.seek(0)
+            image_data.append({"bytes": img_file.read(), "description": str(desc).strip()})
+        except Exception:
+            pass
+    return image_data
+
+
+def generate_sections(validated_data: dict[str, Any]) -> dict[str, Any]:
+    """Run source ingestion + LLM/fallback generation and return the structured document data,
+    without rendering PDF/DOCX/LaTeX. Used by both the one-shot flow and the review-before-export flow."""
     source_text = validated_data["source_text"].strip()
     agent_instructions = validated_data.get("agent_instructions", "").strip()
     document_language = detect_document_language(source_text, agent_instructions)
@@ -71,31 +172,69 @@ def build_document_payload(validated_data: dict[str, Any]) -> RenderedDocument:
     # Read uploaded images into memory before any async/generator usage
     source_images = validated_data.get("source_images") or []
     image_descriptions = validated_data.get("image_descriptions") or []
-    image_data: list[dict[str, Any]] = []
-    for i, img_file in enumerate(source_images):
-        desc = image_descriptions[i] if i < len(image_descriptions) else ""
-        try:
-            img_file.seek(0)
-            image_data.append({"bytes": img_file.read(), "description": str(desc).strip()})
-        except Exception:
-            pass
+    image_data = read_image_data(source_images, image_descriptions)
 
-    doc_data = generate_document_data(source_text, agent_instructions, document_language, image_data)
+    template = validated_data.get("template") or "general"
+    target_length = validated_data.get("target_length") or "standard"
+    tone = validated_data.get("tone") or "formal"
+    max_sections = validated_data.get("max_sections")
+
+    doc_data = generate_document_data(
+        source_text,
+        agent_instructions,
+        document_language,
+        image_data,
+        template=template,
+        target_length=target_length,
+        tone=tone,
+        max_sections=max_sections,
+    )
     generation_mode = str(doc_data.get("generation_mode", "fallback"))
     title = str(doc_data.get("title", "")).strip() or _fallback_title(source_text)
     client_name = str(doc_data.get("client_name", "")).strip()
     document_sections: list[DocSection] = doc_data.get("document_sections", [])
-    latex_source = str(doc_data.get("latex_source", "")).strip()
+    llm_latex_source = str(doc_data.get("latex_source", "")).strip()
 
     if not document_sections:
-        document_sections = _fallback_sections(source_text, document_language, image_data)
+        document_sections = _fallback_sections(
+            source_text, document_language, image_data, template=template, target_length=target_length,
+            max_sections=max_sections,
+        )
     elif image_data:
         document_sections = _ensure_figures(document_sections, image_data)
 
-    if not latex_source:
-        latex_source = _build_latex(title, client_name, document_sections, document_language, image_data)
+    return {
+        "title": title,
+        "client_name": client_name,
+        "source_text": source_text,
+        "document_language": document_language,
+        "document_sections": document_sections,
+        "generation_mode": generation_mode,
+        "llm_latex_source": llm_latex_source,
+        "image_data": image_data,
+        "filename": slugify(title) or "documentation",
+    }
 
-    filename = slugify(title) or "documentation"
+
+def render_sections(
+    *,
+    title: str,
+    client_name: str,
+    source_text: str,
+    document_sections: list[DocSection],
+    document_language: str,
+    logo: Any,
+    image_data: list[dict[str, Any]] | None = None,
+    llm_latex_source: str = "",
+    generation_mode: str = "fallback",
+    filename: str | None = None,
+) -> RenderedDocument:
+    """Render PDF/DOCX/LaTeX from already-generated (and possibly user-edited) document sections."""
+    image_data = image_data or []
+    latex_source = (llm_latex_source or "").strip() or _build_latex(
+        title, client_name, document_sections, document_language, image_data
+    )
+    filename = filename or slugify(title) or "documentation"
     timestamp = datetime.now(timezone.utc).strftime("%Y-%m-%d %H:%M UTC")
 
     pdf_bytes = render_pdf(
@@ -104,7 +243,7 @@ def build_document_payload(validated_data: dict[str, Any]) -> RenderedDocument:
         source_text=source_text,
         document_sections=document_sections,
         document_language=document_language,
-        logo=validated_data.get("logo"),
+        logo=logo,
         timestamp=timestamp,
         image_data=image_data,
     )
@@ -133,6 +272,22 @@ def build_document_payload(validated_data: dict[str, Any]) -> RenderedDocument:
         tex_zip_bytes=tex_zip_bytes,
         latex_source=latex_source,
         generation_mode=generation_mode,
+    )
+
+
+def build_document_payload(validated_data: dict[str, Any]) -> RenderedDocument:
+    gen = generate_sections(validated_data)
+    return render_sections(
+        title=gen["title"],
+        client_name=gen["client_name"],
+        source_text=gen["source_text"],
+        document_sections=gen["document_sections"],
+        document_language=gen["document_language"],
+        logo=validated_data.get("logo"),
+        image_data=gen["image_data"],
+        llm_latex_source=gen["llm_latex_source"],
+        generation_mode=gen["generation_mode"],
+        filename=gen["filename"],
     )
 
 
@@ -174,12 +329,20 @@ def generate_document_data(
     agent_instructions: str = "",
     document_language: str = "en",
     image_data: list[dict[str, Any]] | None = None,
+    *,
+    template: str = "general",
+    target_length: str = "standard",
+    tone: str = "formal",
+    max_sections: int | None = None,
 ) -> dict[str, Any]:
     api_key = _env_value("OPENAI_API_KEY")
     model = _env_value("OPENAI_MODEL", default="gpt-4.1-mini")
 
     if not api_key:
-        return _fallback_document_data(source_text, document_language, image_data or [])
+        return _fallback_document_data(
+            source_text, document_language, image_data or [], template=template, target_length=target_length,
+            max_sections=max_sections,
+        )
 
     try:
         client = OpenAI(api_key=api_key)
@@ -191,6 +354,13 @@ def generate_document_data(
                 "Write them in English if the transcript/instructions are mainly English. "
                 f"Detected language preference: {document_language}."
             ),
+        })
+        guidance_parts = [_length_guidance(target_length), _tone_guidance(tone), _template_guidance(template)]
+        if max_sections:
+            guidance_parts.append(f"Do not exceed {max_sections} sections in total.")
+        messages.append({
+            "role": "system",
+            "content": " ".join(part for part in guidance_parts if part),
         })
         if image_data:
             img_list = "\n".join(
@@ -225,12 +395,133 @@ def generate_document_data(
         raw = response.choices[0].message.content or "{}"
         parsed = json.loads(raw)
         parsed["generation_mode"] = "openai"
-        parsed["document_sections"] = _normalise_sections(
+        sections = _normalise_sections(
             parsed.get("document_sections", []), source_text, document_language, image_data or []
         )
+        parsed["document_sections"] = _apply_max_sections(sections, max_sections)
         return parsed
     except Exception:
-        return _fallback_document_data(source_text, document_language, image_data or [])
+        return _fallback_document_data(
+            source_text, document_language, image_data or [], template=template, target_length=target_length,
+            max_sections=max_sections,
+        )
+
+
+def regenerate_section(
+    *,
+    source_text: str,
+    agent_instructions: str = "",
+    document_language: str = "en",
+    template: str = "general",
+    target_length: str = "standard",
+    tone: str = "formal",
+    section_title: str,
+    section_type: str = "paragraph",
+    section_instructions: str = "",
+) -> DocSection:
+    """Regenerate a single section's content, used by the review-before-export flow."""
+    api_key = _env_value("OPENAI_API_KEY")
+    model = _env_value("OPENAI_MODEL", default="gpt-4.1-mini")
+
+    if not api_key:
+        return _fallback_regenerate_section(source_text, document_language, section_title, section_type)
+
+    try:
+        client = OpenAI(api_key=api_key)
+        guidance = " ".join(part for part in (
+            _length_guidance(target_length), _tone_guidance(tone), _template_guidance(template),
+        ) if part)
+        system_prompt = (
+            "You are revising a single section of a client-ready document. Return ONLY a valid JSON object "
+            "(no markdown fences) for exactly one section using this schema:\n"
+            '{"title": "<title>", "type": "paragraph|bullets|table", '
+            '"content": "<prose>" | ["<item>", "<item>"] | {"headers": ["<col>"], "rows": [["<val>"]]}}\n\n'
+            f"Section to write: \"{section_title}\". The \"type\" MUST be \"{section_type}\" — keep the same "
+            f"presentation format as before, matching \"content\" to that type's shape. Never paste raw "
+            f"transcript text — always synthesise and rewrite. {guidance}"
+        )
+        messages: list[dict[str, str]] = [
+            {"role": "system", "content": system_prompt},
+            {
+                "role": "system",
+                "content": f"Write the section in {'Spanish' if document_language == 'es' else 'English'}.",
+            },
+        ]
+        if agent_instructions:
+            messages.append({"role": "system", "content": f"Additional author instructions: {agent_instructions}"})
+        if section_instructions:
+            messages.append({"role": "system", "content": f"Specific instructions for this section: {section_instructions}"})
+        messages.append({"role": "user", "content": source_text})
+
+        response = client.chat.completions.create(
+            model=model,
+            temperature=0.4,
+            response_format={"type": "json_object"},
+            messages=messages,
+        )
+        raw = response.choices[0].message.content or "{}"
+        parsed = json.loads(raw)
+        normalised = _normalise_sections([parsed], source_text, document_language, [])
+        if normalised:
+            section = normalised[0]
+            section["title"] = section.get("title") or section_title
+            return _coerce_section_type(section, section_type)
+        return _fallback_regenerate_section(source_text, document_language, section_title, section_type)
+    except Exception:
+        return _fallback_regenerate_section(source_text, document_language, section_title, section_type)
+
+
+def _coerce_section_type(section: DocSection, target_type: str) -> DocSection:
+    """Force a regenerated section back to the type the caller asked for, converting content shape
+    if the LLM drifted (e.g. returned a paragraph when bullets were requested)."""
+    if section.get("type") == target_type or target_type not in ("paragraph", "bullets", "table"):
+        return section
+
+    content = section.get("content")
+    if target_type == "bullets":
+        if isinstance(content, list):
+            new_content: Any = content
+        elif isinstance(content, dict):
+            new_content = [" — ".join(row) for row in content.get("rows", [])] or [str(content)]
+        else:
+            parts = re.split(r"(?<=[.!?])\s+", str(content).strip())
+            new_content = [p for p in parts if p] or [str(content)]
+    elif target_type == "paragraph":
+        if isinstance(content, list):
+            new_content = " ".join(str(item) for item in content)
+        elif isinstance(content, dict):
+            rows = content.get("rows", [])
+            new_content = " ".join(" — ".join(row) for row in rows)
+        else:
+            new_content = str(content)
+    else:  # table
+        if isinstance(content, dict):
+            new_content = content
+        elif isinstance(content, list):
+            new_content = {"headers": ["Item"], "rows": [[str(item)] for item in content]}
+        else:
+            new_content = {"headers": ["Content"], "rows": [[str(content)]]}
+
+    return {"title": section.get("title", ""), "type": target_type, "content": new_content}
+
+
+def _fallback_regenerate_section(
+    source_text: str,
+    document_language: str,
+    section_title: str,
+    section_type: str,
+) -> DocSection:
+    if section_type == "bullets":
+        content: Any = _extract_lines(source_text)[:6] or ["See source context for details."]
+    elif section_type == "table":
+        labels = localized_labels(document_language)
+        content = {
+            "headers": labels["version_headers"],
+            "rows": [["1.0", datetime.now(timezone.utc).strftime("%Y-%m-%d"), "", labels["initial_draft"]]],
+        }
+    else:
+        content = _fallback_summary(source_text, sentence_count=2)
+    return {"title": section_title, "type": section_type, "content": content}
 
 
 # ---------------------------------------------------------------------------
@@ -322,18 +613,28 @@ def _normalise_sections(
     return sections if sections else _fallback_sections(source_text, document_language, image_data)
 
 
+_LENGTH_KEY_POINT_COUNT = {"brief": 4, "standard": 6, "detailed": 10}
+_LENGTH_SUMMARY_SENTENCES = {"brief": 1, "standard": 2, "detailed": 4}
+
+
 def _fallback_sections(
     source_text: str,
     document_language: str,
     image_data: list[dict[str, Any]] | None = None,
+    *,
+    template: str = "general",
+    target_length: str = "standard",
+    max_sections: int | None = None,
 ) -> list[DocSection]:
-    summary = _fallback_summary(source_text)
-    lines = _extract_lines(source_text)[:6] or ["See source context for details."]
+    summary = _fallback_summary(source_text, sentence_count=_LENGTH_SUMMARY_SENTENCES.get(target_length, 2))
+    point_count = _LENGTH_KEY_POINT_COUNT.get(target_length, 6)
+    lines = _extract_lines(source_text)[:point_count] or ["See source context for details."]
     labels = localized_labels(document_language)
     sections: list[DocSection] = [
         {"title": labels["executive_summary"], "type": "paragraph", "content": summary},
         {"title": labels["key_points"], "type": "bullets", "content": lines},
     ]
+    sections.extend(_template_fallback_sections(template, source_text, document_language))
     for i, img in enumerate(image_data or []):
         caption = f"Figure {i + 1}: {img['description']}" if img["description"] else f"Figure {i + 1}"
         sections.append({
@@ -349,6 +650,19 @@ def _fallback_sections(
             "rows": [["1.0", datetime.now(timezone.utc).strftime("%Y-%m-%d"), "", labels["initial_draft"]]],
         },
     })
+    return _apply_max_sections(sections, max_sections)
+
+
+def _template_fallback_sections(template: str, source_text: str, document_language: str) -> list[DocSection]:
+    """Deterministic skeleton sections added per template when generating without an LLM."""
+    labels = _TEMPLATE_SECTION_LABELS.get(template)
+    if not labels:
+        return []
+    lines = _extract_lines(source_text)
+    placeholder = "Pendiente de detalle." if document_language == "es" else "To be detailed."
+    sections: list[DocSection] = []
+    for label in labels:
+        sections.append({"title": label, "type": "bullets", "content": lines[:3] or [placeholder]})
     return sections
 
 
@@ -356,10 +670,17 @@ def _fallback_document_data(
     source_text: str,
     document_language: str,
     image_data: list[dict[str, Any]] | None = None,
+    *,
+    template: str = "general",
+    target_length: str = "standard",
+    max_sections: int | None = None,
 ) -> dict[str, Any]:
     title = _fallback_title(source_text)
     client_name = _fallback_client_name(source_text)
-    document_sections = _fallback_sections(source_text, document_language, image_data)
+    document_sections = _fallback_sections(
+        source_text, document_language, image_data, template=template, target_length=target_length,
+        max_sections=max_sections,
+    )
     latex_source = _build_latex(title, client_name, document_sections, document_language, image_data or [])
     return {
         "title": title,
@@ -776,9 +1097,9 @@ def _fallback_client_name(source_text: str) -> str:
     return match.group(1).strip() if match else ""
 
 
-def _fallback_summary(source_text: str) -> str:
+def _fallback_summary(source_text: str, sentence_count: int = 2) -> str:
     parts = re.split(r"(?<=[.!?])\s+", re.sub(r"\s+", " ", source_text.strip()))
-    return " ".join(parts[:2]) if parts else source_text[:240].strip() or "Generated documentation."
+    return " ".join(parts[:sentence_count]) if parts else source_text[:240].strip() or "Generated documentation."
 
 
 def _extract_lines(source_text: str) -> list[str]:
