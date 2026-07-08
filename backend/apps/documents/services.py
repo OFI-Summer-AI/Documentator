@@ -14,18 +14,22 @@ from typing import Any
 from pypdf import PdfReader
 
 from docx import Document
-from docx.shared import Cm
+from docx.enum.text import WD_ALIGN_PARAGRAPH, WD_TAB_ALIGNMENT
+from docx.oxml import OxmlElement
+from docx.oxml.ns import qn
+from docx.shared import Cm, Pt, RGBColor
 from django.utils.text import slugify
 from openai import OpenAI
 from reportlab.lib import colors
-from reportlab.lib.enums import TA_CENTER
+from reportlab.lib.enums import TA_CENTER, TA_LEFT
 from reportlab.lib.pagesizes import A4
 from reportlab.lib.styles import ParagraphStyle, getSampleStyleSheet
 from reportlab.lib.units import cm
 from reportlab.lib.utils import ImageReader
 from reportlab.platypus import (
-    Image, PageBreak, Paragraph, SimpleDocTemplate, Spacer, Table, TableStyle
+    HRFlowable, Image, PageBreak, Paragraph, SimpleDocTemplate, Spacer, Table, TableStyle
 )
+from reportlab.platypus.tableofcontents import TableOfContents
 
 # ---------------------------------------------------------------------------
 # Constants
@@ -34,6 +38,43 @@ from reportlab.platypus import (
 ASSETS_DIR = Path(__file__).resolve().parents[2] / "assets"
 
 DocSection = dict[str, Any]
+
+# ---------------------------------------------------------------------------
+# Shared design tokens — one palette/scale reused across the PDF, DOCX, and
+# LaTeX renderers so the three output formats read as the same document.
+# ---------------------------------------------------------------------------
+
+PALETTE = {
+    "ink": "0f3d4a",  # cover title / darkest text
+    "ink_text": "1f2933",  # body copy
+    "accent": "0e7490",  # primary teal — headings, table headers, rules
+    "accent_dark": "0b4f5c",  # cover band background
+    "gold": "d7aa3a",  # secondary accent — thin rules, callout border
+    "muted": "415d66",  # subtitles, captions
+    "muted_light": "5b7280",  # footer text
+    "border": "c9e4e8",  # table/box borders
+    "border_light": "dbeaec",  # table inner gridlines
+    "band": "f5fafb",  # table banding / callout background
+    "white": "ffffff",
+}
+
+
+def _hex(name: str) -> str:
+    """Palette colour as a reportlab-style '#RRGGBB' string."""
+    return f"#{PALETTE[name]}"
+
+
+def _numbered_titles(document_sections: list[DocSection]) -> dict[int, str]:
+    """Map section index -> 'N. Title' for every titled (non-figure) section, in document order."""
+    numbering: dict[int, str] = {}
+    counter = 0
+    for i, sec in enumerate(document_sections):
+        title = str(sec.get("title", ""))
+        if not title or sec.get("type") == "figure":
+            continue
+        counter += 1
+        numbering[i] = f"{counter}. {title}"
+    return numbering
 
 _LENGTH_GUIDANCE = {
     "brief": (
@@ -193,7 +234,6 @@ def generate_sections(validated_data: dict[str, Any]) -> dict[str, Any]:
     title = str(doc_data.get("title", "")).strip() or _fallback_title(source_text)
     client_name = str(doc_data.get("client_name", "")).strip()
     document_sections: list[DocSection] = doc_data.get("document_sections", [])
-    llm_latex_source = str(doc_data.get("latex_source", "")).strip()
 
     if not document_sections:
         document_sections = _fallback_sections(
@@ -210,7 +250,6 @@ def generate_sections(validated_data: dict[str, Any]) -> dict[str, Any]:
         "document_language": document_language,
         "document_sections": document_sections,
         "generation_mode": generation_mode,
-        "llm_latex_source": llm_latex_source,
         "image_data": image_data,
         "filename": slugify(title) or "documentation",
     }
@@ -225,15 +264,15 @@ def render_sections(
     document_language: str,
     logo: Any,
     image_data: list[dict[str, Any]] | None = None,
-    llm_latex_source: str = "",
     generation_mode: str = "fallback",
     filename: str | None = None,
 ) -> RenderedDocument:
-    """Render PDF/DOCX/LaTeX from already-generated (and possibly user-edited) document sections."""
+    """Render PDF/DOCX/LaTeX from already-generated (and possibly user-edited) document sections.
+
+    The LaTeX/PDF/DOCX layouts are always built deterministically from document_sections (never from
+    LLM-authored LaTeX) so every export uses the same polished, consistent template."""
     image_data = image_data or []
-    latex_source = (llm_latex_source or "").strip() or _build_latex(
-        title, client_name, document_sections, document_language, image_data
-    )
+    latex_source = _build_latex(title, client_name, document_sections, document_language, image_data)
     filename = filename or slugify(title) or "documentation"
     timestamp = datetime.now(timezone.utc).strftime("%Y-%m-%d %H:%M UTC")
 
@@ -285,7 +324,6 @@ def build_document_payload(validated_data: dict[str, Any]) -> RenderedDocument:
         document_language=gen["document_language"],
         logo=validated_data.get("logo"),
         image_data=gen["image_data"],
-        llm_latex_source=gen["llm_latex_source"],
         generation_mode=gen["generation_mode"],
         filename=gen["filename"],
     )
@@ -318,8 +356,7 @@ _SYSTEM_PROMPT = (
     '    {"title": "<section title>", "type": "bullets", "content": ["<item>", "<item>"]},\n'
     '    {"title": "<section title>", "type": "table", "content": {"headers": ["<col1>", "<col2>"], "rows": [["<val>", "<val>"]]}},\n'
     '    {"title": "", "type": "figure", "content": {"figure_index": 0, "figure_number": 1, "caption": "<Figure N: descriptive caption>"}}\n'
-    '  ],\n'
-    '  "latex_source": "<complete compilable LaTeX document>"\n'
+    '  ]\n'
     '}'
 )
 
@@ -681,12 +718,10 @@ def _fallback_document_data(
         source_text, document_language, image_data, template=template, target_length=target_length,
         max_sections=max_sections,
     )
-    latex_source = _build_latex(title, client_name, document_sections, document_language, image_data or [])
     return {
         "title": title,
         "client_name": client_name,
         "document_sections": document_sections,
-        "latex_source": latex_source,
         "generation_mode": "fallback",
     }
 
@@ -704,89 +739,146 @@ def _build_latex(
 ) -> str:
     logo_path = resolve_ofi_logo_path()
     labels = localized_labels(document_language)
-    ofi_logo_block = "\\includegraphics[width=1.8cm]{ofi-logo}" if logo_path else "\\fbox{\\textbf{OFI}}"
-    client_line = f"\\textbf{{{_le(labels['client'])}}}: {_le(client_name)}\\\\" if client_name else ""
-
-    toc_items = "\n".join(
-        f"\\item {_le(str(sec.get('title', '')))}"
-        for sec in document_sections
-        if sec.get("title")
-    )
-    body_blocks: list[str] = []
+    ofi_logo_block = "\\includegraphics[height=1cm]{ofi-logo}" if logo_path else "\\textbf{\\textcolor{docaccent}{OFI}}"
+    timestamp = datetime.now(timezone.utc).strftime("%Y-%m-%d")
+    numbering = _numbered_titles(document_sections)
     has_figures = any(s.get("type") == "figure" for s in document_sections)
 
-    for sec in document_sections:
+    def heading(index: int, use_box: bool = False) -> str:
+        """A numbered, TOC-registered heading. `use_box` renders it as the lead summary callout."""
+        numbered_title = numbering.get(index, "")
+        if use_box:
+            return (
+                f"\\phantomsection\\addcontentsline{{toc}}{{section}}{{{_le(numbered_title)}}}\n"
+            )
+        return (
+            f"\\phantomsection\\addcontentsline{{toc}}{{section}}{{{_le(numbered_title)}}}\n"
+            f"\\section*{{{_le(numbered_title)}}}\n"
+        )
+
+    body_blocks: list[str] = []
+    for i, sec in enumerate(document_sections):
         sec_title = str(sec.get("title", ""))
         sec_type = str(sec.get("type", "paragraph"))
         content = sec.get("content", "")
+        is_lead_summary = i == 0 and sec_type == "paragraph" and sec_title
 
         if sec_type == "figure" and isinstance(content, dict):
-            fig_num = content.get("figure_number", 1)
-            caption = content.get("caption", f"Figure {fig_num}")
+            caption = str(content.get("caption", ""))
             fig_idx = content.get("figure_index", 0)
             body_blocks.append(
-                f"\\begin{{figure}}[H]\n"
-                f"\\centering\n"
-                f"\\includegraphics[width=0.8\\textwidth]{{figure_{fig_idx}}}\n"
-                f"\\caption{{{_le(caption)}}}\n"
-                f"\\end{{figure}}"
+                "\\begin{figure}[H]\n"
+                "\\centering\n"
+                f"\\fcolorbox{{docborder}}{{white}}{{\\includegraphics[width=0.78\\textwidth]{{figure_{fig_idx}}}}}\\\\[0.25cm]\n"
+                f"{{\\small\\color{{docmuted}}{_le(caption)}}}\n"
+                "\\end{figure}"
+            )
+        elif is_lead_summary:
+            body_blocks.append(
+                heading(i, use_box=True)
+                + "\\begin{tcolorbox}[colback=docband, colframe=docborder, coltitle=white, "
+                "colbacktitle=docaccent, fonttitle=\\bfseries, title={" + _le(numbering.get(i, sec_title))
+                + "}, boxrule=0.4pt, arc=2mm, left=10pt, right=10pt, top=8pt, bottom=8pt]\n"
+                f"{_le(str(content))}\n"
+                "\\end{tcolorbox}"
             )
         elif sec_type == "bullets":
-            items_str = "\n".join(f"\\item {_le(str(b))}" for b in (content if isinstance(content, list) else [str(content)]))
+            items_str = "\n".join(
+                f"\\item {_le(str(b))}" for b in (content if isinstance(content, list) else [str(content)])
+            )
             body_blocks.append(
-                f"\\section*{{{_le(sec_title)}}}\n"
-                f"\\begin{{itemize}}[leftmargin=1.2em]\n{items_str}\n\\end{{itemize}}"
+                heading(i)
+                + f"\\begin{{itemize}}[leftmargin=1.2em, itemsep=3pt, label=\\textcolor{{docaccent}}{{\\textbullet}}]\n"
+                f"{items_str}\n\\end{{itemize}}"
             )
         elif sec_type == "table" and isinstance(content, dict):
             headers = content.get("headers", [])
             rows = content.get("rows", [])
             col_count = max(len(headers), max((len(r) for r in rows), default=0), 1)
-            col_fmt = "|".join(["l"] * col_count)
-            header_row = " & ".join(_le(str(h)) for h in headers) + " \\\\ \\hline"
+            col_fmt = "".join(["X"] * col_count)
+            header_row = " & ".join(f"\\textcolor{{white}}{{\\textbf{{{_le(str(h))}}}}}" for h in headers) + " \\\\"
             data_rows = "\n".join(" & ".join(_le(str(c)) for c in row) + " \\\\" for row in rows)
             body_blocks.append(
-                f"\\section*{{{_le(sec_title)}}}\n"
-                f"\\begin{{tabular}}{{|{col_fmt}|}}\n"
-                f"\\hline\n{header_row}\n{data_rows}\n"
-                f"\\hline\n\\end{{tabular}}"
+                heading(i)
+                + "{\\renewcommand{\\arraystretch}{1.35}\\rowcolors{2}{docband}{white}\n"
+                f"\\begin{{tabularx}}{{\\textwidth}}{{{col_fmt}}}\n"
+                f"\\toprule\n\\rowcolor{{docaccent}} {header_row}\n\\midrule\n{data_rows}\n\\bottomrule\n"
+                "\\end{tabularx}}"
             )
         else:
             if sec_title:
-                body_blocks.append(f"\\section*{{{_le(sec_title)}}}\n{_le(str(content))}")
+                body_blocks.append(heading(i) + _le(str(content)))
             else:
                 body_blocks.append(_le(str(content)))
 
     body_block = "\n\n".join(body_blocks)
     float_pkg = "\\usepackage{float}\n" if has_figures else ""
+    client_line = (
+        f"{{\\color{{white}}\\large {_le(labels['client'])}: {_le(client_name)}}}\\\\[0.3cm]\n"
+        if client_name
+        else ""
+    )
+    header_title = title if len(title) <= 60 else f"{title[:57]}..."
+
+    color_defs = "\n".join(
+        f"\\definecolor{{doc{name.replace('_', '')}}}{{HTML}}{{{hexval.upper()}}}" for name, hexval in PALETTE.items()
+    )
 
     return (
         "\\documentclass[11pt,a4paper]{article}\n"
-        "\\usepackage[margin=1in]{geometry}\n"
+        "\\usepackage[margin=2.2cm]{geometry}\n"
         "\\usepackage[T1]{fontenc}\n"
         "\\usepackage[utf8]{inputenc}\n"
+        "\\usepackage{lmodern}\n"
+        "\\usepackage{parskip}\n"
         "\\usepackage{graphicx}\n"
         f"{float_pkg}"
-        "\\usepackage{longtable}\n"
+        "\\usepackage{tabularx}\n"
         "\\usepackage{booktabs}\n"
         "\\usepackage{enumitem}\n"
-        "\\usepackage{xcolor}\n"
+        "\\usepackage[table]{xcolor}\n"
+        f"{color_defs}\n"
+        "\\usepackage{titlesec}\n"
+        "\\usepackage{tcolorbox}\n"
+        "\\usepackage{fancyhdr}\n"
         "\\usepackage{hyperref}\n"
-        "\\hypersetup{colorlinks=true, linkcolor=teal!60!black, urlcolor=teal!60!black}\n"
+        "\\hypersetup{colorlinks=true, linkcolor=docaccent, urlcolor=docaccent, "
+        f"pdftitle={{{_le(title)}}}, pdfauthor={{Documentator}}}}\n"
+        "\\titleformat{\\section}{\\Large\\bfseries\\color{docink}}{}{0pt}{}"
+        "[{\\color{docgold}\\titlerule[1.1pt]}\\vspace{2pt}]\n"
+        "\\titlespacing*{\\section}{0pt}{1.4em}{0.9em}\n"
+        "\\pagestyle{fancy}\n"
+        "\\fancyhf{}\n"
+        f"\\fancyhead[L]{{\\small\\color{{docmutedlight}} {_le(header_title)}}}\n"
+        f"\\fancyhead[R]{{{ofi_logo_block}}}\n"
+        "\\fancyfoot[L]{\\small\\color{docmutedlight}\\textit{Documentator}}\n"
+        "\\fancyfoot[R]{\\small\\color{docmutedlight}\\thepage}\n"
+        "\\renewcommand{\\headrulewidth}{0.6pt}\n"
+        "\\renewcommand{\\footrulewidth}{0.4pt}\n"
+        "\\setlength{\\parindent}{0pt}\n"
         "\\begin{document}\n"
-        f"\\noindent\\hfill{ofi_logo_block}\\par\n"
-        "\\vspace{1.2cm}\n"
-        "\\begin{center}\n"
-        f"{{\\LARGE\\bfseries {_le(title)}}}\\\\[0.45cm]\n"
-        f"{client_line}\n"
-        f"\\textbf{{{_le(labels['version'])}}}: 1.0\n"
-        "\\end{center}\n"
-        "\\newpage\n"
-        f"\\noindent\\hfill{ofi_logo_block}\\par\n"
-        f"\\section*{{{_le(labels['contents'])}}}\n"
-        "\\begin{itemize}[leftmargin=1.2em]\n"
-        f"{toc_items}\n"
-        "\\end{itemize}\n"
-        "\\newpage\n\n"
+        "\\begin{titlepage}\n"
+        "\\centering\n"
+        "\\vspace*{3cm}\n"
+        "\\noindent\\colorbox{docaccentdark}{\\parbox{\\dimexpr\\textwidth-2\\fboxsep\\relax}{\\centering\n"
+        "\\vspace{1.5cm}\n"
+        f"{{\\color{{white}}\\fontsize{{26}}{{32}}\\selectfont\\bfseries {_le(title)}}}\\\\[0.5cm]\n"
+        "{\\color{docgold}\\rule{5cm}{1.4pt}}\\\\[0.4cm]\n"
+        f"{client_line}"
+        "\\vspace{1.3cm}\n"
+        "}}\n"
+        "\\vspace{1.4cm}\n"
+        "\\renewcommand{\\arraystretch}{1.5}\n"
+        "\\begin{tabular}{r l}\n"
+        f"\\textcolor{{docmuted}}{{\\textbf{{{_le(labels['version'])}:}}}} & 1.0 \\\\\n"
+        f"\\textcolor{{docmuted}}{{\\textbf{{{'Fecha' if document_language == 'es' else 'Date'}:}}}} & {timestamp} \\\\\n"
+        "\\end{tabular}\n"
+        "\\vfill\n"
+        f"{ofi_logo_block}\n"
+        "\\end{titlepage}\n\n"
+        "\\clearpage\n"
+        "\\tableofcontents\n"
+        "\\clearpage\n\n"
         f"{body_block}\n"
         "\\end{document}\n"
     )
@@ -823,6 +915,21 @@ def _le(value: str) -> str:
 # PDF rendering
 # ---------------------------------------------------------------------------
 
+class _ReportDocTemplate(SimpleDocTemplate):
+    """Feeds numbered section headings into the TableOfContents flowable and registers PDF
+    outline bookmarks, so the compiled PDF gets a real, page-numbered TOC and a clickable
+    sidebar outline. Requires doc.multiBuild() (two passes) instead of doc.build()."""
+
+    def afterFlowable(self, flowable):
+        if isinstance(flowable, Paragraph) and getattr(flowable, "style", None) is not None:
+            if flowable.style.name == "SecH":
+                text = flowable.getPlainText()
+                self.notify("TOCEntry", (0, text, self.page))
+                key = f"sec-{id(flowable)}-{self.page}"
+                self.canv.bookmarkPage(key)
+                self.canv.addOutlineEntry(text, key, level=0, closed=False)
+
+
 def render_pdf(
     *,
     title: str,
@@ -836,78 +943,132 @@ def render_pdf(
 ) -> bytes:
     image_data = image_data or []
     buffer = io.BytesIO()
-    doc = SimpleDocTemplate(
+    doc = _ReportDocTemplate(
         buffer,
         pagesize=A4,
-        leftMargin=1.5 * cm, rightMargin=1.5 * cm,
-        topMargin=1.8 * cm, bottomMargin=1.5 * cm,
+        leftMargin=1.8 * cm, rightMargin=1.8 * cm,
+        topMargin=2.0 * cm, bottomMargin=1.7 * cm,
     )
     styles = getSampleStyleSheet()
 
+    ink = colors.HexColor(_hex("ink"))
+    ink_text = colors.HexColor(_hex("ink_text"))
+    accent = colors.HexColor(_hex("accent"))
+    accent_dark = colors.HexColor(_hex("accent_dark"))
+    gold = colors.HexColor(_hex("gold"))
+    muted = colors.HexColor(_hex("muted"))
+    muted_light = colors.HexColor(_hex("muted_light"))
+    border = colors.HexColor(_hex("border"))
+    border_light = colors.HexColor(_hex("border_light"))
+    band = colors.HexColor(_hex("band"))
+
     S = {
-        "title": ParagraphStyle("DocTitle", parent=styles["Title"], fontName="Helvetica-Bold", fontSize=26,
-                                leading=30, textColor=colors.HexColor("#0f3d4a"), alignment=TA_CENTER, spaceAfter=14),
-        "subtitle": ParagraphStyle("DocSub", parent=styles["BodyText"], fontName="Helvetica", fontSize=10,
-                                   textColor=colors.HexColor("#415d66"), alignment=TA_CENTER, spaceAfter=4),
-        "h1": ParagraphStyle("SecH", parent=styles["Heading2"], fontName="Helvetica-Bold", fontSize=14,
-                              leading=18, textColor=colors.HexColor("#0e7490"), spaceBefore=14, spaceAfter=8),
+        "cover_title": ParagraphStyle("CoverTitle", parent=styles["Title"], fontName="Helvetica-Bold", fontSize=27,
+                                      leading=32, textColor=colors.white, alignment=TA_CENTER),
+        "cover_sub": ParagraphStyle("CoverSub", parent=styles["BodyText"], fontName="Helvetica", fontSize=12.5,
+                                    leading=17, textColor=colors.white, alignment=TA_CENTER),
+        "info_label": ParagraphStyle("InfoLabel", parent=styles["BodyText"], fontName="Helvetica-Bold", fontSize=9,
+                                     leading=13, textColor=muted, alignment=TA_LEFT),
+        "info_value": ParagraphStyle("InfoValue", parent=styles["BodyText"], fontName="Helvetica", fontSize=10,
+                                     leading=13, textColor=ink_text, alignment=TA_LEFT),
+        "toc_title": ParagraphStyle("TocTitle", parent=styles["Title"], fontName="Helvetica-Bold", fontSize=19,
+                                    leading=23, textColor=ink, alignment=TA_LEFT, spaceAfter=2),
+        "h1": ParagraphStyle("SecH", parent=styles["Heading2"], fontName="Helvetica-Bold", fontSize=14.5,
+                              leading=18, textColor=ink, spaceBefore=18, spaceAfter=6),
         "body": ParagraphStyle("Body", parent=styles["BodyText"], fontName="Helvetica", fontSize=10.5,
-                               leading=15, textColor=colors.HexColor("#1f2933"), spaceAfter=4),
+                               leading=16, textColor=ink_text, spaceAfter=4),
         "bullet": ParagraphStyle("Bullet", parent=styles["BodyText"], fontName="Helvetica", fontSize=10.5,
-                                 leading=15, textColor=colors.HexColor("#1f2933"), leftIndent=14, spaceAfter=2),
-        "toc": ParagraphStyle("Toc", parent=styles["BodyText"], fontName="Helvetica", fontSize=11,
-                              leading=16, textColor=colors.HexColor("#1f2933"), leftIndent=10, spaceAfter=3),
+                                 leading=16, textColor=ink_text, leftIndent=14, spaceAfter=3),
         "th": ParagraphStyle("TH", parent=styles["BodyText"], fontName="Helvetica-Bold", fontSize=9.5,
                              textColor=colors.white),
         "td": ParagraphStyle("TD", parent=styles["BodyText"], fontName="Helvetica", fontSize=9.5,
-                             textColor=colors.HexColor("#1f2933")),
+                             textColor=ink_text),
         "caption": ParagraphStyle("FigCaption", parent=styles["BodyText"], fontName="Helvetica-Oblique",
-                                  fontSize=9, leading=12, textColor=colors.HexColor("#415d66"),
+                                  fontSize=9, leading=12, textColor=muted,
                                   alignment=TA_CENTER, spaceAfter=8),
     }
 
     story: list[Any] = []
 
-    logo_reader: ImageReader | None = None
-    ofi_logo_reader: ImageReader | None = None
     client_logo_bytes: io.BytesIO | None = None
-
     if logo:
         logo.seek(0)
         client_logo_bytes = io.BytesIO(logo.read())
-        logo_reader = ImageReader(client_logo_bytes)
 
     logo_path = resolve_ofi_logo_path()
     labels = localized_labels(document_language)
-    if logo_path:
-        ofi_logo_reader = ImageReader(str(logo_path))
+    ofi_logo_reader = ImageReader(str(logo_path)) if logo_path else None
 
-    # Cover page
+    numbering = _numbered_titles(document_sections)
+    available_width = A4[0] - doc.leftMargin - doc.rightMargin
+
+    # ---- Cover page ----
     if client_logo_bytes:
         client_logo_bytes.seek(0)
-        story.append(Image(client_logo_bytes, width=3.2 * cm, height=3.2 * cm, kind="proportional"))
-        story.append(Spacer(1, 0.35 * cm))
-    story.append(Spacer(1, 4.5 * cm))
-    story.append(Paragraph(_p(title or "Document"), S["title"]))
+        cover_logo = Image(client_logo_bytes, width=2.6 * cm, height=2.6 * cm, kind="proportional")
+        cover_logo.hAlign = "CENTER"
+        story.append(Spacer(1, 1.4 * cm))
+        story.append(cover_logo)
+        story.append(Spacer(1, 0.7 * cm))
+    else:
+        story.append(Spacer(1, 2.6 * cm))
+
+    band_rows: list[Any] = [
+        [Paragraph(_p(title or "Document"), S["cover_title"])],
+        [HRFlowable(width="16%", thickness=1.6, color=gold, spaceBefore=10, spaceAfter=10, hAlign="CENTER")],
+    ]
     if client_name:
-        story.append(Paragraph(_p(client_name), S["subtitle"]))
-    story.append(Paragraph(_p(f"{labels['version']} 1.0  |  {timestamp}"), S["subtitle"]))
+        band_rows.append([Paragraph(_p(client_name), S["cover_sub"])])
+    band_table = Table(band_rows, colWidths=[available_width])
+    band_table.setStyle(TableStyle([
+        ("BACKGROUND", (0, 0), (-1, -1), accent_dark),
+        ("ALIGN", (0, 0), (-1, -1), "CENTER"),
+        ("VALIGN", (0, 0), (-1, -1), "MIDDLE"),
+        ("TOPPADDING", (0, 0), (-1, 0), 32),
+        ("BOTTOMPADDING", (0, -1), (-1, -1), 32),
+        ("LEFTPADDING", (0, 0), (-1, -1), 26), ("RIGHTPADDING", (0, 0), (-1, -1), 26),
+    ]))
+    story.append(band_table)
+    story.append(Spacer(1, 1.2 * cm))
+
+    date_label = "Fecha" if document_language == "es" else "Date"
+    info_rows = [
+        [Paragraph(labels["version"].upper(), S["info_label"]), Paragraph("1.0", S["info_value"])],
+        [Paragraph(date_label.upper(), S["info_label"]), Paragraph(timestamp, S["info_value"])],
+    ]
+    info_table = Table(info_rows, colWidths=[available_width * 0.32, available_width * 0.68], hAlign="CENTER")
+    info_table.setStyle(TableStyle([
+        ("BOX", (0, 0), (-1, -1), 0.8, border),
+        ("INNERGRID", (0, 0), (-1, -1), 0.4, border_light),
+        ("LEFTPADDING", (0, 0), (-1, -1), 14), ("RIGHTPADDING", (0, 0), (-1, -1), 14),
+        ("TOPPADDING", (0, 0), (-1, -1), 9), ("BOTTOMPADDING", (0, 0), (-1, -1), 9),
+        ("VALIGN", (0, 0), (-1, -1), "MIDDLE"),
+    ]))
+    story.append(info_table)
+    story.append(Spacer(1, 2.4 * cm))
+    if ofi_logo_reader is not None:
+        cover_brand = Image(str(logo_path), width=1.9 * cm, height=1.9 * cm, kind="proportional")
+        cover_brand.hAlign = "CENTER"
+        story.append(cover_brand)
     story.append(PageBreak())
 
-    # Table of contents — own page
-    story.append(Paragraph(labels["contents"], S["h1"]))
-    for sec in document_sections:
-        if sec.get("title"):
-            story.append(Paragraph(_p(str(sec.get("title", ""))), S["toc"], bulletText="-"))
+    # ---- Table of contents — own page, real page numbers via TableOfContents ----
+    story.append(Paragraph(labels["contents"], S["toc_title"]))
+    story.append(HRFlowable(width="100%", thickness=1.3, color=gold, spaceBefore=4, spaceAfter=16))
+    toc = TableOfContents()
+    toc.levelStyles = [
+        ParagraphStyle("TOCLevel0", parent=styles["BodyText"], fontName="Helvetica", fontSize=11.5,
+                       leading=22, textColor=ink_text, leftIndent=0, firstLineIndent=0),
+    ]
+    story.append(toc)
     story.append(PageBreak())
 
-    # Body sections
-    available_width = A4[0] - 3.0 * cm
-
-    for sec in document_sections:
+    # ---- Body sections ----
+    for i, sec in enumerate(document_sections):
         sec_title = str(sec.get("title", ""))
         sec_type = str(sec.get("type", "paragraph"))
         content = sec.get("content")
+        is_lead_summary = i == 0 and sec_type == "paragraph" and bool(sec_title)
 
         if sec_type == "figure" and isinstance(content, dict):
             fig_idx = int(content.get("figure_index", 0))
@@ -917,6 +1078,7 @@ def render_pdf(
                 try:
                     img_bytes = _to_png_bytes(image_data[fig_idx]["bytes"])
                     fig_img = Image(io.BytesIO(img_bytes), width=min(13 * cm, available_width), kind="proportional")
+                    fig_img.hAlign = "CENTER"
                     story.append(fig_img)
                 except Exception:
                     pass  # image unreadable; caption still renders below
@@ -926,11 +1088,22 @@ def render_pdf(
             continue
 
         if sec_title:
-            story.append(Paragraph(_p(sec_title), S["h1"]))
+            story.append(Paragraph(_p(numbering.get(i, sec_title)), S["h1"]))
+            story.append(HRFlowable(width="100%", thickness=1.1, color=gold, spaceBefore=0, spaceAfter=10))
 
-        if sec_type == "bullets" and isinstance(content, list):
+        if is_lead_summary:
+            summary_table = Table([[Paragraph(_p(str(content)), S["body"])]], colWidths=[available_width])
+            summary_table.setStyle(TableStyle([
+                ("BACKGROUND", (0, 0), (-1, -1), band),
+                ("BOX", (0, 0), (-1, -1), 0.8, border),
+                ("LEFTPADDING", (0, 0), (-1, -1), 14), ("RIGHTPADDING", (0, 0), (-1, -1), 14),
+                ("TOPPADDING", (0, 0), (-1, -1), 12), ("BOTTOMPADDING", (0, 0), (-1, -1), 12),
+            ]))
+            story.append(summary_table)
+
+        elif sec_type == "bullets" and isinstance(content, list):
             for item in content:
-                story.append(Paragraph(_p(str(item)), S["bullet"], bulletText="-"))
+                story.append(Paragraph(_p(str(item)), S["bullet"], bulletText="•"))
 
         elif sec_type == "table" and isinstance(content, dict):
             headers = [str(h) for h in content.get("headers", [])]
@@ -941,45 +1114,53 @@ def render_pdf(
                            [[Paragraph(_p(c), S["td"]) for c in row] for row in rows]
                 pdf_tbl = Table(tbl_data, colWidths=[col_w] * len(headers), repeatRows=1)
                 pdf_tbl.setStyle(TableStyle([
-                    ("BACKGROUND", (0, 0), (-1, 0), colors.HexColor("#0e7490")),
-                    ("ROWBACKGROUNDS", (0, 1), (-1, -1), [colors.HexColor("#f5fafb"), colors.white]),
-                    ("BOX", (0, 0), (-1, -1), 0.8, colors.HexColor("#c9e4e8")),
-                    ("INNERGRID", (0, 0), (-1, -1), 0.4, colors.HexColor("#dbeaec")),
+                    ("BACKGROUND", (0, 0), (-1, 0), accent),
+                    ("LINEBELOW", (0, 0), (-1, 0), 1.4, gold),
+                    ("ROWBACKGROUNDS", (0, 1), (-1, -1), [band, colors.white]),
+                    ("BOX", (0, 0), (-1, -1), 0.8, border),
+                    ("INNERGRID", (0, 1), (-1, -1), 0.4, border_light),
                     ("VALIGN", (0, 0), (-1, -1), "TOP"),
-                    ("LEFTPADDING", (0, 0), (-1, -1), 6), ("RIGHTPADDING", (0, 0), (-1, -1), 6),
-                    ("TOPPADDING", (0, 0), (-1, -1), 5), ("BOTTOMPADDING", (0, 0), (-1, -1), 5),
+                    ("LEFTPADDING", (0, 0), (-1, -1), 7), ("RIGHTPADDING", (0, 0), (-1, -1), 7),
+                    ("TOPPADDING", (0, 0), (-1, -1), 6), ("BOTTOMPADDING", (0, 0), (-1, -1), 6),
                 ]))
                 story.append(pdf_tbl)
 
         else:
             story.append(Paragraph(_p(str(content or "")), S["body"]))
 
-        story.append(Spacer(1, 0.2 * cm))
+        story.append(Spacer(1, 0.25 * cm))
+
+    def draw_cover(canvas, doc_obj) -> None:
+        pass
 
     def draw_page(canvas, doc_obj) -> None:
         canvas.saveState()
+        header_title = title if len(title) <= 70 else f"{title[:67]}..."
+        canvas.setFont("Helvetica", 8.5)
+        canvas.setFillColor(muted_light)
+        canvas.drawString(doc_obj.leftMargin, A4[1] - 1.25 * cm, header_title)
         if ofi_logo_reader is not None:
             canvas.drawImage(
                 ofi_logo_reader,
-                A4[0] - doc_obj.rightMargin - 1.8 * cm, A4[1] - 2.15 * cm,
-                width=1.4 * cm, height=1.4 * cm, preserveAspectRatio=True, mask="auto",
+                A4[0] - doc_obj.rightMargin - 1.2 * cm, A4[1] - 1.55 * cm,
+                width=1.2 * cm, height=1.2 * cm, preserveAspectRatio=True, mask="auto",
             )
         else:
-            canvas.setStrokeColor(colors.HexColor("#c7b37a"))
-            canvas.circle(A4[0] - doc_obj.rightMargin - 0.9 * cm, A4[1] - 1.0 * cm, 0.45 * cm, stroke=1, fill=0)
-            canvas.setFont("Helvetica-Bold", 8)
-            canvas.setFillColor(colors.HexColor("#3a3a3a"))
-            canvas.drawCentredString(A4[0] - doc_obj.rightMargin - 0.9 * cm, A4[1] - 1.06 * cm, "OFI")
-        canvas.setStrokeColor(colors.HexColor("#d1e6e9"))
+            canvas.setFont("Helvetica-Bold", 9)
+            canvas.setFillColor(accent)
+            canvas.drawRightString(A4[0] - doc_obj.rightMargin, A4[1] - 1.3 * cm, "OFI")
+        canvas.setStrokeColor(border)
         canvas.setLineWidth(0.8)
-        canvas.line(doc_obj.leftMargin, A4[1] - 1.15 * cm, A4[0] - doc_obj.rightMargin, A4[1] - 1.15 * cm)
+        canvas.line(doc_obj.leftMargin, A4[1] - 1.45 * cm, A4[0] - doc_obj.rightMargin, A4[1] - 1.45 * cm)
+        canvas.setStrokeColor(border)
+        canvas.line(doc_obj.leftMargin, 1.15 * cm, A4[0] - doc_obj.rightMargin, 1.15 * cm)
         canvas.setFont("Helvetica", 8)
-        canvas.setFillColor(colors.HexColor("#5b7280"))
-        canvas.drawString(doc_obj.leftMargin, 0.9 * cm, "Documentator")
-        canvas.drawRightString(A4[0] - doc_obj.rightMargin, 0.9 * cm, f"Page {canvas.getPageNumber()}")
+        canvas.setFillColor(muted_light)
+        canvas.drawString(doc_obj.leftMargin, 0.85 * cm, "Documentator")
+        canvas.drawRightString(A4[0] - doc_obj.rightMargin, 0.85 * cm, f"Page {canvas.getPageNumber()}")
         canvas.restoreState()
 
-    doc.build(story, onFirstPage=draw_page, onLaterPages=draw_page)
+    doc.multiBuild(story, onFirstPage=draw_cover, onLaterPages=draw_page)
     return buffer.getvalue()
 
 
@@ -996,6 +1177,75 @@ def _p(value: str) -> str:
 # DOCX rendering
 # ---------------------------------------------------------------------------
 
+def _docx_shade(element_pr, hex_color: str) -> None:
+    """Apply background shading to a cell (tcPr) or paragraph (pPr) properties element."""
+    shd = OxmlElement("w:shd")
+    shd.set(qn("w:val"), "clear")
+    shd.set(qn("w:color"), "auto")
+    shd.set(qn("w:fill"), hex_color)
+    element_pr.append(shd)
+
+
+def _docx_cell_shade(cell, hex_color: str) -> None:
+    _docx_shade(cell._tc.get_or_add_tcPr(), hex_color)
+
+
+def _docx_paragraph_border(paragraph, *, color: str, size: int = 10) -> None:
+    pBdr = OxmlElement("w:pBdr")
+    bottom = OxmlElement("w:bottom")
+    bottom.set(qn("w:val"), "single")
+    bottom.set(qn("w:sz"), str(size))
+    bottom.set(qn("w:space"), "6")
+    bottom.set(qn("w:color"), color)
+    pBdr.append(bottom)
+    paragraph._p.get_or_add_pPr().append(pBdr)
+
+
+def _docx_add_field(paragraph, instruction: str, placeholder: str = "") -> None:
+    """Insert a real Word field (TOC, PAGE, ...) that Word computes/updates on open."""
+    run = paragraph.add_run()
+    r = run._r
+    begin = OxmlElement("w:fldChar")
+    begin.set(qn("w:fldCharType"), "begin")
+    instr = OxmlElement("w:instrText")
+    instr.set(qn("xml:space"), "preserve")
+    instr.text = instruction
+    separate = OxmlElement("w:fldChar")
+    separate.set(qn("w:fldCharType"), "separate")
+    end = OxmlElement("w:fldChar")
+    end.set(qn("w:fldCharType"), "end")
+    r.append(begin)
+    r.append(instr)
+    r.append(separate)
+    if placeholder:
+        t = OxmlElement("w:t")
+        t.text = placeholder
+        r.append(t)
+    r.append(end)
+
+
+def _docx_set_run_color(run, hex_color: str) -> None:
+    run.font.color.rgb = RGBColor.from_string(hex_color)
+
+
+def _docx_configure_styles(document: Document) -> None:
+    """Base typography: Calibri body copy, teal Heading 1 with a gold rule, generous line spacing."""
+    normal = document.styles["Normal"]
+    normal.font.name = "Calibri"
+    normal.font.size = Pt(10.5)
+    normal.font.color.rgb = RGBColor.from_string(PALETTE["ink_text"])
+    normal.paragraph_format.line_spacing = 1.2
+    normal.paragraph_format.space_after = Pt(8)
+
+    heading1 = document.styles["Heading 1"]
+    heading1.font.name = "Calibri"
+    heading1.font.size = Pt(16)
+    heading1.font.bold = True
+    heading1.font.color.rgb = RGBColor.from_string(PALETTE["ink"])
+    heading1.paragraph_format.space_before = Pt(20)
+    heading1.paragraph_format.space_after = Pt(4)
+
+
 def render_docx(
     *,
     title: str,
@@ -1008,34 +1258,113 @@ def render_docx(
     image_data = image_data or []
     document = Document()
     labels = localized_labels(document_language)
-
-    header = document.sections[0].header
-    hp = header.paragraphs[0] if header.paragraphs else header.add_paragraph()
-    hp.alignment = 2
     logo_path = resolve_ofi_logo_path()
+    numbering = _numbered_titles(document_sections)
+    _docx_configure_styles(document)
+
+    section = document.sections[0]
+    content_width = section.page_width - section.left_margin - section.right_margin
+
+    # ---- Running header: document title (left) + OFI brand (right) ----
+    header_title = title if len(title) <= 70 else f"{title[:67]}..."
+    hp = section.header.paragraphs[0] if section.header.paragraphs else section.header.add_paragraph()
+    hp.paragraph_format.tab_stops.add_tab_stop(content_width, WD_TAB_ALIGNMENT.RIGHT)
+    title_run = hp.add_run(header_title)
+    title_run.font.size = Pt(8.5)
+    _docx_set_run_color(title_run, PALETTE["muted_light"])
+    hp.add_run("\t")
     if logo_path:
-        hp.add_run().add_picture(str(logo_path), width=Cm(1.4))
+        hp.add_run().add_picture(str(logo_path), height=Cm(0.9))
     else:
-        run = hp.add_run("OFI")
-        run.bold = True
+        brand_run = hp.add_run("OFI")
+        brand_run.bold = True
+        _docx_set_run_color(brand_run, PALETTE["accent"])
+    _docx_paragraph_border(hp, color=PALETTE["border"], size=6)
 
-    document.add_heading(title or "Document", level=1)
+    # ---- Running footer: brand (left) + page number (right) ----
+    fp = section.footer.paragraphs[0] if section.footer.paragraphs else section.footer.add_paragraph()
+    fp.paragraph_format.tab_stops.add_tab_stop(content_width, WD_TAB_ALIGNMENT.RIGHT)
+    foot_run = fp.add_run("Documentator")
+    foot_run.font.size = Pt(8)
+    _docx_set_run_color(foot_run, PALETTE["muted_light"])
+    fp.add_run("\t")
+    page_label_run = fp.add_run(f"{'Página' if document_language == 'es' else 'Page'} ")
+    page_label_run.font.size = Pt(8)
+    _docx_set_run_color(page_label_run, PALETTE["muted_light"])
+    _docx_add_field(fp, "PAGE", "1")
+
+    # ---- Cover page ----
+    if logo_path:
+        logo_para = document.add_paragraph()
+        logo_para.alignment = WD_ALIGN_PARAGRAPH.CENTER
+        logo_para.add_run().add_picture(str(logo_path), height=Cm(1.6))
+        logo_para.paragraph_format.space_after = Pt(18)
+
+    band_table = document.add_table(rows=2 if client_name else 1, cols=1)
+    band_table.autofit = False
+    band_table.columns[0].width = content_width
+    title_cell = band_table.rows[0].cells[0]
+    title_cell.width = content_width
+    _docx_cell_shade(title_cell, PALETTE["accent_dark"])
+    title_para = title_cell.paragraphs[0]
+    title_para.alignment = WD_ALIGN_PARAGRAPH.CENTER
+    title_para.paragraph_format.space_before = Pt(28)
+    title_para.paragraph_format.space_after = Pt(6) if client_name else Pt(28)
+    title_run = title_para.add_run(title or "Document")
+    title_run.font.size = Pt(24)
+    title_run.font.bold = True
+    _docx_set_run_color(title_run, PALETTE["white"])
     if client_name:
-        document.add_paragraph(f"{labels['client']}: {client_name}")
-    document.add_paragraph(f"{labels['version']}: 1.0")
-    document.add_paragraph(f"Generated: {timestamp}")
+        sub_cell = band_table.rows[1].cells[0]
+        _docx_cell_shade(sub_cell, PALETTE["accent_dark"])
+        sub_para = sub_cell.paragraphs[0]
+        sub_para.alignment = WD_ALIGN_PARAGRAPH.CENTER
+        sub_para.paragraph_format.space_after = Pt(28)
+        sub_run = sub_para.add_run(client_name)
+        sub_run.font.size = Pt(13)
+        _docx_set_run_color(sub_run, PALETTE["white"])
+
+    spacer = document.add_paragraph()
+    spacer.paragraph_format.space_after = Pt(20)
+
+    info_table = document.add_table(rows=2, cols=2)
+    info_table.autofit = False
+    info_table.style = "Table Grid"
+    info_labels = [labels["version"].upper(), ("FECHA" if document_language == "es" else "DATE")]
+    info_values = ["1.0", timestamp]
+    for row_idx, (label_text, value_text) in enumerate(zip(info_labels, info_values)):
+        label_cell, value_cell = info_table.rows[row_idx].cells
+        label_cell.width = Cm(3.5)
+        value_cell.width = content_width - Cm(3.5)
+        label_run = label_cell.paragraphs[0].add_run(label_text)
+        label_run.font.bold = True
+        label_run.font.size = Pt(9)
+        _docx_set_run_color(label_run, PALETTE["muted"])
+        value_run = value_cell.paragraphs[0].add_run(value_text)
+        value_run.font.size = Pt(10)
     document.add_page_break()
 
-    document.add_heading(labels["contents"], level=1)
-    for sec in document_sections:
-        if sec.get("title"):
-            document.add_paragraph(str(sec.get("title", "")), style="List Bullet")
+    # ---- Table of contents — real Word TOC field ----
+    toc_heading = document.add_paragraph()
+    toc_heading.paragraph_format.space_after = Pt(4)
+    toc_run = toc_heading.add_run(labels["contents"])
+    toc_run.font.size = Pt(19)
+    toc_run.font.bold = True
+    _docx_set_run_color(toc_run, PALETTE["ink"])
+    _docx_paragraph_border(toc_heading, color=PALETTE["gold"], size=16)
+
+    toc_paragraph = document.add_paragraph()
+    hint = "Haz clic derecho y elige “Actualizar campos” para generar el índice." if document_language == "es" \
+        else "Right-click and choose “Update Field” to generate the table of contents."
+    _docx_add_field(toc_paragraph, 'TOC \\o "1-1" \\h \\z \\u', hint)
     document.add_page_break()
 
-    for sec in document_sections:
+    # ---- Body sections ----
+    for i, sec in enumerate(document_sections):
         sec_title = str(sec.get("title", ""))
         sec_type = str(sec.get("type", "paragraph"))
         content = sec.get("content")
+        is_lead_summary = i == 0 and sec_type == "paragraph" and bool(sec_title)
 
         if sec_type == "figure" and isinstance(content, dict):
             fig_idx = int(content.get("figure_index", 0))
@@ -1043,18 +1372,36 @@ def render_docx(
             if fig_idx < len(image_data):
                 try:
                     img_bytes = _to_png_bytes(image_data[fig_idx]["bytes"])
-                    document.add_picture(io.BytesIO(img_bytes), width=Cm(12))
+                    pic_para = document.add_paragraph()
+                    pic_para.alignment = WD_ALIGN_PARAGRAPH.CENTER
+                    pic_para.add_run().add_picture(io.BytesIO(img_bytes), width=Cm(14))
                 except Exception:
                     pass  # image unreadable; caption still renders below
             if caption:
-                cap_para = document.add_paragraph(caption)
-                cap_para.alignment = 1  # center
+                cap_para = document.add_paragraph()
+                cap_para.alignment = WD_ALIGN_PARAGRAPH.CENTER
+                cap_run = cap_para.add_run(caption)
+                cap_run.font.size = Pt(9)
+                cap_run.font.italic = True
+                _docx_set_run_color(cap_run, PALETTE["muted"])
             continue
 
         if sec_title:
-            document.add_heading(sec_title, level=2)
+            document.add_heading(numbering.get(i, sec_title), level=1)
 
-        if sec_type == "bullets" and isinstance(content, list):
+        if is_lead_summary:
+            box = document.add_table(rows=1, cols=1)
+            box.autofit = False
+            box.columns[0].width = content_width
+            cell = box.rows[0].cells[0]
+            cell.width = content_width
+            _docx_cell_shade(cell, PALETTE["band"])
+            cell_para = cell.paragraphs[0]
+            cell_para.paragraph_format.space_before = Pt(4)
+            cell_para.paragraph_format.space_after = Pt(4)
+            cell_para.add_run(str(content))
+
+        elif sec_type == "bullets" and isinstance(content, list):
             for item in content:
                 document.add_paragraph(str(item), style="List Bullet")
 
@@ -1064,15 +1411,29 @@ def render_docx(
             if headers:
                 tbl = document.add_table(rows=1 + len(rows), cols=len(headers))
                 tbl.style = "Table Grid"
-                for i, h in enumerate(headers):
-                    tbl.rows[0].cells[i].text = h
-                    tbl.rows[0].cells[i].paragraphs[0].runs[0].bold = True
+                tbl.autofit = True
+                for ci, h in enumerate(headers):
+                    header_cell = tbl.rows[0].cells[ci]
+                    _docx_cell_shade(header_cell, PALETTE["accent"])
+                    run = header_cell.paragraphs[0].add_run(h)
+                    run.font.bold = True
+                    _docx_set_run_color(run, PALETTE["white"])
                 for ri, row_data in enumerate(rows):
+                    band_this_row = ri % 2 == 0
                     for ci, cell_val in enumerate(row_data):
-                        tbl.rows[ri + 1].cells[ci].text = cell_val
+                        data_cell = tbl.rows[ri + 1].cells[ci]
+                        if band_this_row:
+                            _docx_cell_shade(data_cell, PALETTE["band"])
+                        data_cell.paragraphs[0].add_run(cell_val)
 
         else:
             document.add_paragraph(str(content or ""))
+
+    # Tell Word to recompute all fields (TOC, PAGE) as soon as the document is opened, instead
+    # of showing raw field placeholders until the user manually chooses "Update Field".
+    update_fields = OxmlElement("w:updateFields")
+    update_fields.set(qn("w:val"), "true")
+    document.settings.element.append(update_fields)
 
     buf = io.BytesIO()
     document.save(buf)
