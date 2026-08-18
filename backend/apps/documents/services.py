@@ -266,13 +266,17 @@ def render_sections(
     image_data: list[dict[str, Any]] | None = None,
     generation_mode: str = "fallback",
     filename: str | None = None,
+    include_ofi_logo: bool = True,
 ) -> RenderedDocument:
     """Render PDF/DOCX/LaTeX from already-generated (and possibly user-edited) document sections.
 
     The LaTeX/PDF/DOCX layouts are always built deterministically from document_sections (never from
     LLM-authored LaTeX) so every export uses the same polished, consistent template."""
     image_data = image_data or []
-    latex_source = _build_latex(title, client_name, document_sections, document_language, image_data)
+    latex_source = _build_latex(
+        title, client_name, document_sections, document_language, image_data,
+        include_ofi_logo=include_ofi_logo,
+    )
     filename = filename or slugify(title) or "documentation"
     timestamp = datetime.now(timezone.utc).strftime("%Y-%m-%d %H:%M UTC")
 
@@ -285,6 +289,7 @@ def render_sections(
         logo=logo,
         timestamp=timestamp,
         image_data=image_data,
+        include_ofi_logo=include_ofi_logo,
     )
     docx_bytes = render_docx(
         title=title,
@@ -293,11 +298,13 @@ def render_sections(
         document_language=document_language,
         timestamp=timestamp,
         image_data=image_data,
+        include_ofi_logo=include_ofi_logo,
     )
     tex_zip_bytes = build_tex_zip(
         latex_source=latex_source,
         filename=filename,
         image_data=image_data,
+        include_ofi_logo=include_ofi_logo,
     )
 
     return RenderedDocument(
@@ -326,6 +333,7 @@ def build_document_payload(validated_data: dict[str, Any]) -> RenderedDocument:
         image_data=gen["image_data"],
         generation_mode=gen["generation_mode"],
         filename=gen["filename"],
+        include_ofi_logo=validated_data.get("include_ofi_logo", True),
     )
 
 
@@ -736,8 +744,10 @@ def _build_latex(
     document_sections: list[DocSection],
     document_language: str,
     image_data: list[dict[str, Any]] | None = None,
+    *,
+    include_ofi_logo: bool = True,
 ) -> str:
-    logo_path = resolve_ofi_logo_path()
+    logo_path = resolve_ofi_logo_path() if include_ofi_logo else None
     labels = localized_labels(document_language)
     ofi_logo_block = "\\includegraphics[height=1cm]{ofi-logo}" if logo_path else "\\textbf{\\textcolor{docaccent}{OFI}}"
     timestamp = datetime.now(timezone.utc).strftime("%Y-%m-%d")
@@ -940,6 +950,7 @@ def render_pdf(
     logo: Any,
     timestamp: str,
     image_data: list[dict[str, Any]] | None = None,
+    include_ofi_logo: bool = True,
 ) -> bytes:
     image_data = image_data or []
     buffer = io.BytesIO()
@@ -995,7 +1006,7 @@ def render_pdf(
         logo.seek(0)
         client_logo_bytes = io.BytesIO(logo.read())
 
-    logo_path = resolve_ofi_logo_path()
+    logo_path = resolve_ofi_logo_path() if include_ofi_logo else None
     labels = localized_labels(document_language)
     ofi_logo_reader = ImageReader(str(logo_path)) if logo_path else None
 
@@ -1254,11 +1265,12 @@ def render_docx(
     document_language: str,
     timestamp: str,
     image_data: list[dict[str, Any]] | None = None,
+    include_ofi_logo: bool = True,
 ) -> bytes:
     image_data = image_data or []
     document = Document()
     labels = localized_labels(document_language)
-    logo_path = resolve_ofi_logo_path()
+    logo_path = resolve_ofi_logo_path() if include_ofi_logo else None
     numbering = _numbered_titles(document_sections)
     _docx_configure_styles(document)
 
@@ -1476,6 +1488,7 @@ def build_tex_zip(
     latex_source: str,
     filename: str,
     image_data: list[dict[str, Any]],
+    include_ofi_logo: bool = True,
 ) -> bytes:
     """Bundle LaTeX source + all referenced images into a self-contained zip."""
     tex_name = f"{filename}.tex"
@@ -1489,7 +1502,7 @@ def build_tex_zip(
             except Exception:
                 pass
 
-        logo_path = resolve_ofi_logo_path()
+        logo_path = resolve_ofi_logo_path() if include_ofi_logo else None
         if logo_path and logo_path.exists():
             try:
                 with open(logo_path, "rb") as f:

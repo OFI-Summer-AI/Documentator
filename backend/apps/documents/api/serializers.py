@@ -18,6 +18,7 @@ class DocumentGenerationSerializer(GenerationOptionsMixin, serializers.Serialize
     source_text = serializers.CharField()
     agent_instructions = serializers.CharField(required=False, allow_blank=True)
     logo = serializers.ImageField(required=False, allow_null=True)
+    include_ofi_logo = serializers.BooleanField(required=False, default=True)
 
 
 class DocumentSectionsGenerationSerializer(GenerationOptionsMixin, serializers.Serializer):
@@ -31,6 +32,7 @@ class DocumentRenderSerializer(serializers.Serializer):
     document_language = serializers.ChoiceField(choices=("en", "es"), required=False, default="en")
     document_sections = serializers.CharField()
     logo = serializers.ImageField(required=False, allow_null=True)
+    include_ofi_logo = serializers.BooleanField(required=False, default=True)
 
 
 class SectionRegenerateSerializer(GenerationOptionsMixin, serializers.Serializer):

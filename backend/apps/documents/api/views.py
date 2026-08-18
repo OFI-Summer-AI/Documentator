@@ -142,6 +142,7 @@ class DocumentRenderView(APIView):
             logo=validated.get("logo"),
             image_data=image_data,
             generation_mode="edited",
+            include_ofi_logo=validated.get("include_ofi_logo", True),
         )
         return Response(_document_response_payload(document), status=status.HTTP_200_OK)
 

@@ -276,6 +276,7 @@ export default function App() {
   const [sourceText, setSourceText] = useState('')
   const [agentInstructions, setAgentInstructions] = useState('')
   const [logoFile, setLogoFile] = useState(null)
+  const [includeOfiLogo, setIncludeOfiLogo] = useState(true)
   const [pdfFiles, setPdfFiles] = useState([])
   const [imageItems, setImageItems] = useState([])
 
@@ -395,6 +396,7 @@ export default function App() {
       if (logoFile) {
         payload.append('logo', logoFile)
       }
+      payload.append('include_ofi_logo', includeOfiLogo)
 
       const response = await fetch(`${API_BASE_URL}/api/documents/preview/`, {
         method: 'POST',
@@ -522,6 +524,7 @@ export default function App() {
       if (logoFile) {
         payload.append('logo', logoFile)
       }
+      payload.append('include_ofi_logo', includeOfiLogo)
       imageItems.forEach(({ file }) => payload.append('source_images', file))
 
       const response = await fetch(`${API_BASE_URL}/api/documents/render/`, {
@@ -724,6 +727,15 @@ export default function App() {
                   <input className="creator-file" type="file" accept="image/png,image/jpeg,image/webp" onChange={handleLogoChange} />
                   <span className="field-note">Attach a logo if the output needs branding.</span>
                   {logoFile ? <span className="file-pill">{logoFile.name}</span> : null}
+                </label>
+
+                <label className="options-row">
+                  <input
+                    type="checkbox"
+                    checked={includeOfiLogo}
+                    onChange={(e) => setIncludeOfiLogo(e.target.checked)}
+                  />
+                  <span>Include OFI logo in the document</span>
                 </label>
               </CollapsibleSection>
 

@@ -9,3 +9,5 @@ backend/staticfiles/
 frontend/node_modules/
 frontend/dist/
 
+ARCHITECTURE.md
+
