@@ -647,6 +647,14 @@ export default function App() {
                   />
                   <span>Review &amp; edit sections before exporting</span>
                 </label>
+                <label className="options-row">
+                  <input
+                    type="checkbox"
+                    checked={includeOfiLogo}
+                    onChange={(e) => setIncludeOfiLogo(e.target.checked)}
+                  />
+                  <span>Include OFI logo in the document</span>
+                </label>
               </CollapsibleSection>
 
               <CollapsibleSection title="Additional files" icon={<Upload size={14} />}>
@@ -727,15 +735,6 @@ export default function App() {
                   <input className="creator-file" type="file" accept="image/png,image/jpeg,image/webp" onChange={handleLogoChange} />
                   <span className="field-note">Attach a logo if the output needs branding.</span>
                   {logoFile ? <span className="file-pill">{logoFile.name}</span> : null}
-                </label>
-
-                <label className="options-row">
-                  <input
-                    type="checkbox"
-                    checked={includeOfiLogo}
-                    onChange={(e) => setIncludeOfiLogo(e.target.checked)}
-                  />
-                  <span>Include OFI logo in the document</span>
                 </label>
               </CollapsibleSection>
 
